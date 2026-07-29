@@ -1,0 +1,41 @@
+# steps-offboard-identity.yml
+#
+# Reusable step template: installs cypher-shell and runs
+# onboarding/scripts/render-and-run.sh offboard for the given identity.
+# Included from offboard-identity-pipeline.yml (or your own pipeline).
+
+parameters:
+  - name: identityName
+    type: string
+  - name: dryRun
+    type: boolean
+    default: false
+
+steps:
+  - bash: |
+      set -euo pipefail
+      sudo install -d -m 0755 /etc/apt/keyrings
+      wget -qO - https://debian.neo4j.com/neotechnology.gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/neotechnology.gpg
+      echo 'deb [signed-by=/etc/apt/keyrings/neotechnology.gpg] https://debian.neo4j.com stable latest' | sudo tee /etc/apt/sources.list.d/neo4j.list
+      sudo apt-get update
+      sudo apt-get install -y cypher-shell
+      cypher-shell --version
+    displayName: 'Install cypher-shell'
+
+  - bash: |
+      set -euo pipefail
+      chmod +x "$(Build.SourcesDirectory)/onboarding/scripts/render-and-run.sh"
+
+      dryRunFlag=""
+      if [ "${{ parameters.dryRun }}" = "True" ] || [ "${{ parameters.dryRun }}" = "true" ]; then
+        dryRunFlag="--dry-run"
+      fi
+
+      "$(Build.SourcesDirectory)/onboarding/scripts/render-and-run.sh" offboard \
+        "${{ parameters.identityName }}" \
+        ${dryRunFlag}
+    displayName: 'Offboard identity'
+    env:
+      NEO4J_BOLT_URI: $(NEO4J_BOLT_URI)
+      NEO4J_ADMIN_USER: $(NEO4J_ADMIN_USER)
+      NEO4J_ADMIN_PASSWORD: $(NEO4J_ADMIN_PASSWORD)

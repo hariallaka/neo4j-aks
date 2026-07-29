@@ -4,6 +4,11 @@ variable "azure_subscription_id" {
   default     = null
 }
 
+variable "entra_tenant_id" {
+  type        = string
+  description = "Entra ID (Azure AD) tenant ID. Used for both AKS's Azure AD RBAC integration and the Neo4j OIDC provider config."
+}
+
 variable "resource_group_name" {
   type        = string
   description = "Name of the resource group to create for the AKS cluster."
@@ -36,14 +41,74 @@ variable "kubernetes_version" {
 
 variable "node_count" {
   type        = number
-  description = "Number of nodes in the default node pool."
+  description = "Number of nodes in the system node pool (critical add-ons only -- see node_pools.tf for tenant workload pools)."
   default     = 3
 }
 
 variable "node_vm_size" {
   type        = string
-  description = "VM size for the default node pool."
+  description = "VM size for the system node pool."
   default     = "Standard_D4s_v5"
+}
+
+variable "local_account_disabled" {
+  type        = bool
+  description = "Disable AKS local admin/user kubeconfig accounts, forcing all cluster access through Azure AD RBAC. Leave false unless you've also switched the kubernetes/helm providers in providers.tf to a kubelogin exec plugin -- local kube_config is what they currently authenticate with."
+  default     = false
+}
+
+variable "aks_admin_group_object_ids" {
+  type        = list(string)
+  description = "Entra ID group Object IDs granted cluster-admin via Azure AD RBAC. Strongly recommended to set at least one in production."
+  default     = []
+}
+
+variable "aks_authorized_ip_ranges" {
+  type        = list(string)
+  description = "CIDR ranges allowed to reach the AKS API server. Empty means unrestricted (default AKS behavior)."
+  default     = []
+}
+
+variable "enable_microsoft_defender" {
+  type        = bool
+  description = "Enable Microsoft Defender for Containers (creates a Log Analytics Workspace for its audit logs)."
+  default     = true
+}
+
+variable "small_pool_vm_size" {
+  type        = string
+  description = "VM size for the \"small\" tenant workload node pool."
+  default     = "Standard_D4s_v5"
+}
+
+variable "small_pool_node_count" {
+  type        = number
+  description = "Node count for the \"small\" tenant workload node pool."
+  default     = 2
+}
+
+variable "large_pool_vm_size" {
+  type        = string
+  description = "VM size for the \"large\" tenant workload node pool."
+  default     = "Standard_D8s_v5"
+}
+
+variable "large_pool_node_count" {
+  type        = number
+  description = "Node count for the \"large\" tenant workload node pool."
+  default     = 2
+}
+
+variable "key_vault_name" {
+  type        = string
+  description = "Name of the Key Vault created for Neo4j secrets (globally unique)."
+  default     = "kv-neo4j-aks"
+}
+
+variable "key_vault_admin_object_id" {
+  type        = string
+  description = "Object ID granted \"Key Vault Secrets Officer\" (read/write secrets). Leave null to use the object ID of whoever/whatever runs terraform apply."
+  default     = null
 }
 
 variable "neo4j_namespace" {
@@ -60,8 +125,8 @@ variable "neo4j_release_name" {
 
 variable "neo4j_edition" {
   type        = string
-  description = "Neo4j edition: community or enterprise. Enterprise requires neo4j_accept_license_agreement to be \"yes\" or \"eval\"."
-  default     = "community"
+  description = "Neo4j edition: community or enterprise. Enterprise requires neo4j_accept_license_agreement to be \"yes\" or \"eval\", and is required for multi-database (multi-tenant) and OIDC/SSO support used here."
+  default     = "enterprise"
 
   validation {
     condition     = contains(["community", "enterprise"], var.neo4j_edition)
@@ -102,4 +167,21 @@ variable "neo4j_data_disk_size_gb" {
   type        = number
   description = "Size in GiB of the persistent volume used for Neo4j data."
   default     = 50
+}
+
+variable "neo4j_node_pool_tier" {
+  type        = string
+  description = "Which tenant workload node pool (node_pools.tf) this Neo4j release schedules onto."
+  default     = "small"
+
+  validation {
+    condition     = contains(["small", "large"], var.neo4j_node_pool_tier)
+    error_message = "neo4j_node_pool_tier must be either \"small\" or \"large\"."
+  }
+}
+
+variable "neo4j_oidc_client_id" {
+  type        = string
+  description = "Application (client) ID of the Entra app registration used for Neo4j SSO/OIDC (see README's one-time Entra setup section). Leave empty to run with native auth only -- OIDC config is omitted entirely until this is set."
+  default     = ""
 }

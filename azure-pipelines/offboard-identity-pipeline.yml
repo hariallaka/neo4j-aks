@@ -1,0 +1,39 @@
+# offboard-identity-pipeline.yml
+#
+# On-demand pipeline to remove one identity's access (see
+# onboarding/cypher/offboard-identity.cypher.tpl for exactly what this
+# does and does not affect). Same prerequisites as
+# onboard-tenant-pipeline.yml.
+
+trigger: none
+pr: none
+
+pool:
+  name: 'self-hosted-neo4j' # replace with your agent pool
+
+parameters:
+  - name: identityName
+    displayName: 'Neo4j user name to remove'
+    type: string
+
+  - name: dryRun
+    displayName: 'Dry run (render Cypher without executing)'
+    type: boolean
+    default: true
+
+variables:
+  - group: neo4j-onboarding-secrets
+  - name: NEO4J_BOLT_URI
+    value: 'neo4j+s://neo4j-aks.example.internal:7687' # replace with your Bolt endpoint
+  - name: NEO4J_ADMIN_USER
+    value: 'svc_provisioning'
+
+stages:
+  - stage: OffboardIdentity
+    jobs:
+      - job: Offboard
+        steps:
+          - template: templates/steps-offboard-identity.yml
+            parameters:
+              identityName: ${{ parameters.identityName }}
+              dryRun: ${{ parameters.dryRun }}

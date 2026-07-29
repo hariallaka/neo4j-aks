@@ -1,0 +1,68 @@
+# onboard-tenant-pipeline.yml
+#
+# On-demand pipeline (no CI/PR trigger) to onboard a usecase/tenant and/or
+# grant one Entra ID identity access to it. Run via Azure DevOps ->
+# Pipelines -> Run pipeline, filling in the parameters below.
+#
+# Requires:
+#   - A self-hosted agent pool with network access to the Neo4j Bolt
+#     endpoint (Microsoft-hosted agents can't reach a private AKS
+#     LoadBalancer/VNet by default).
+#   - A variable group named "neo4j-onboarding-secrets" linked to the
+#     kv-neo4j-aks Key Vault (Azure DevOps -> Library -> + Variable group ->
+#     "Link secrets from an Azure key vault"), exposing at least the
+#     neo4j-admin-password secret as NEO4J_ADMIN_PASSWORD.
+#   - NEO4J_BOLT_URI and NEO4J_ADMIN_USER below updated for your environment.
+
+trigger: none
+pr: none
+
+pool:
+  name: 'self-hosted-neo4j' # replace with your agent pool
+
+parameters:
+  - name: tenant
+    displayName: 'Tenant / usecase name (becomes the Neo4j database name)'
+    type: string
+
+  - name: accessLevel
+    displayName: 'Access level to grant'
+    type: string
+    default: reader
+    values:
+      - reader
+      - writer
+      - admin
+
+  - name: identityName
+    displayName: 'Neo4j user name to create for this identity'
+    type: string
+
+  - name: entraObjectId
+    displayName: 'Entra ID Object ID of the managed identity / service principal'
+    type: string
+
+  - name: dryRun
+    displayName: 'Dry run (render Cypher without executing)'
+    type: boolean
+    default: true
+
+variables:
+  - group: neo4j-onboarding-secrets
+  - name: NEO4J_BOLT_URI
+    value: 'neo4j+s://neo4j-aks.example.internal:7687' # replace with your Bolt endpoint
+  - name: NEO4J_ADMIN_USER
+    value: 'svc_provisioning' # native admin account used only by this pipeline
+
+stages:
+  - stage: OnboardTenant
+    jobs:
+      - job: Onboard
+        steps:
+          - template: templates/steps-onboard-tenant.yml
+            parameters:
+              tenant: ${{ parameters.tenant }}
+              accessLevel: ${{ parameters.accessLevel }}
+              identityName: ${{ parameters.identityName }}
+              entraObjectId: ${{ parameters.entraObjectId }}
+              dryRun: ${{ parameters.dryRun }}

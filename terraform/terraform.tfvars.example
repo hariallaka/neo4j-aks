@@ -2,6 +2,7 @@
 # TF_VAR_* at apply time.
 
 azure_subscription_id = null # or "00000000-0000-0000-0000-000000000000"
+entra_tenant_id       = "11111111-2222-3333-4444-555555555555"
 
 resource_group_name = "rg-neo4j-aks"
 location            = "eastus"
@@ -11,11 +12,28 @@ kubernetes_version  = null # leave null for AKS's current default
 node_count          = 3
 node_vm_size        = "Standard_D4s_v5"
 
-neo4j_namespace                = "neo4j"
-neo4j_release_name             = "neo4j-aks"
-neo4j_edition                   = "community"
-neo4j_accept_license_agreement = "no"
-neo4j_cpu                      = "1000m"
-neo4j_memory                   = "2Gi"
-neo4j_storage_class            = "managed-csi"
-neo4j_data_disk_size_gb        = 50
+local_account_disabled     = false
+aks_admin_group_object_ids = [] # e.g. ["66666666-7777-8888-9999-000000000000"]
+aks_authorized_ip_ranges   = [] # e.g. ["203.0.113.0/24"]
+enable_microsoft_defender  = true
+
+small_pool_vm_size    = "Standard_D4s_v5"
+small_pool_node_count = 2
+large_pool_vm_size    = "Standard_D8s_v5"
+large_pool_node_count = 2
+
+key_vault_name            = "kv-neo4j-aks"
+key_vault_admin_object_id = null
+
+neo4j_namespace                 = "neo4j"
+neo4j_release_name              = "neo4j-aks"
+neo4j_edition                   = "enterprise"
+neo4j_accept_license_agreement  = "yes" # or "eval" for evaluation use
+neo4j_cpu                       = "1000m"
+neo4j_memory                    = "2Gi"
+neo4j_storage_class             = "managed-csi"
+neo4j_data_disk_size_gb         = 50
+neo4j_node_pool_tier            = "small"
+
+# Leave "" until the one-time Entra app registration in README.md is done.
+neo4j_oidc_client_id = ""
