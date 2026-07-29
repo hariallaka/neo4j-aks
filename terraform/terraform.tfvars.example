@@ -1,0 +1,21 @@
+# Copy to terraform.tfvars and adjust, or pass equivalent -var/-var-file/
+# TF_VAR_* at apply time.
+
+azure_subscription_id = null # or "00000000-0000-0000-0000-000000000000"
+
+resource_group_name = "rg-neo4j-aks"
+location            = "eastus"
+cluster_name        = "neo4j-aks"
+dns_prefix          = "neo4j-aks"
+kubernetes_version  = null # leave null for AKS's current default
+node_count          = 3
+node_vm_size        = "Standard_D4s_v5"
+
+neo4j_namespace                = "neo4j"
+neo4j_release_name             = "neo4j-aks"
+neo4j_edition                   = "community"
+neo4j_accept_license_agreement = "no"
+neo4j_cpu                      = "1000m"
+neo4j_memory                   = "2Gi"
+neo4j_storage_class            = "managed-csi"
+neo4j_data_disk_size_gb        = 50
