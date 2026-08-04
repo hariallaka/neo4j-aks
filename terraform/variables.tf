@@ -224,3 +224,33 @@ variable "neo4j_oidc_client_id" {
   description = "Application (client) ID of the Entra app registration used for Neo4j SSO/OIDC (see README's one-time Entra setup section). Leave empty to run with native auth only -- OIDC config is omitted entirely until this is set."
   default     = ""
 }
+
+variable "neo4j_reverse_proxy_enabled" {
+  type        = bool
+  description = "Deploy ingress-nginx plus Neo4j's own \"neo4j-reverse-proxy\" chart in front of Neo4j (see ingress.tf), tunneling Bolt and HTTP through a single ingress host on 443 via WebSocket -- for end users who can only reach a raw HTTP(S) port, not Bolt's 7687 directly. Both run on the tainted \"system\" node pool (aks.tf) via an explicit toleration for its CriticalAddonsOnly taint, a deliberate exception rather than a general loosening of that pool's restriction -- see the README's reverse-proxy section for the trade-offs of that placement."
+  default     = false
+}
+
+variable "neo4j_reverse_proxy_host" {
+  type        = string
+  description = "Hostname end users connect to through the reverse proxy; used as the Ingress host. Required when neo4j_reverse_proxy_enabled = true. DNS for this host and (if used) the TLS certificate itself are outside this stack -- point it at the ingress-nginx controller's LoadBalancer IP once known (see README)."
+  default     = ""
+}
+
+variable "neo4j_reverse_proxy_tls_secret_name" {
+  type        = string
+  description = "Name of an existing Kubernetes TLS Secret, in the Neo4j namespace, for the Ingress to terminate TLS with. Leave empty to run without chart-managed TLS (e.g. if a different mechanism -- ingress annotations, cert-manager -- handles it instead). Provisioning the certificate itself is outside this stack."
+  default     = ""
+}
+
+variable "ingress_nginx_helm_repo_url" {
+  type        = string
+  description = "Helm chart repository URL for ingress-nginx (a separate project/repo from Neo4j's own charts). Point this at an internal mirror if kubernetes.github.io isn't reachable from your network -- same proxy-cache consideration as neo4j_helm_repo_url."
+  default     = "https://kubernetes.github.io/ingress-nginx"
+}
+
+variable "ingress_nginx_chart_version" {
+  type        = string
+  description = "Pin the ingress-nginx chart version. Leave empty to install whatever version the configured repo currently resolves as latest."
+  default     = ""
+}

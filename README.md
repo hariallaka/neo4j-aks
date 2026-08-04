@@ -196,62 +196,68 @@ you want to add them:
 | `neo4j-admin` | A scheduled backup `CronJob` (despite the name, it's backups, not a general admin console) — runs `neo4j-admin database backup` against a running instance/cluster on a cron schedule, to cloud storage or a PVC. | Worth adding if you need automated backups; not currently in this stack. |
 | `neo4j-headless-service` | An additional headless (`clusterIP: None`) Service selecting all members sharing a `neo4j.name`, for stable per-pod internal DNS names instead of (or alongside) the chart's own default/LoadBalancer Services. | Optional; `neo4j.tf`'s per-member Services already provide internal addressing. Its own docs note it's a valid backend target for `neo4j-reverse-proxy` below. |
 | `neo4j-persistent-volume` / `neo4j-docker-desktop-pv` | Pre-provision disks/PVs for the `neo4j` chart to bind to, for storage setups where dynamic provisioning (what `neo4j.tf` uses via `managed-csi`) isn't the right fit, or for local Docker Desktop Kubernetes. | Not needed here — AKS's `managed-csi` dynamic provisioning already covers this. |
-| `neo4j-reverse-proxy` | Deploys a small reverse-proxy pod that fronts both HTTP (Browser) and Bolt traffic behind a single port via WebSocket tunneling, wired through an `ingress-nginx` or `haproxy-ingress` Kubernetes Ingress. Built for networks where only 80/443 egress is allowed. | See the next section — relevant to what you're asking about VM-based nginx below, but this chart's approach is in-cluster (via `ingress-nginx`), not a standalone VM. |
+| `neo4j-reverse-proxy` | Deploys a small reverse-proxy pod that fronts both HTTP (Browser) and Bolt traffic behind a single port via WebSocket tunneling, wired through an `ingress-nginx` or `haproxy-ingress` Kubernetes Ingress. Built for networks where only 80/443 egress is allowed. | **Wired in** — see the next section (`terraform/ingress.tf`, `var.neo4j_reverse_proxy_enabled`). |
 
-### Fronting Neo4j with an external reverse proxy (e.g. a VM running nginx)
+### Fronting Neo4j with ingress-nginx (`terraform/ingress.tf`)
 
-Short answer: **yes, this works**, with one important distinction —
-whether your users can reach a raw TCP port (7687) or only 80/443.
+`var.neo4j_reverse_proxy_enabled` (default `false`) deploys **ingress-nginx
++ Neo4j's own `neo4j-reverse-proxy` chart**, for end users who can only
+reach a raw HTTP(S) port (443) — not Bolt's 7687 directly. This is
+**in-cluster**, not a VM: a Kubernetes `Ingress` object is HTTP(S)-only by
+design, so plain TCP can't go through it — `neo4j-reverse-proxy` is what
+actually tunnels Bolt over WebSocket through the Ingress; ingress-nginx
+just does normal host-based HTTP(S) routing to that proxy pod.
 
-**If port 7687 (Bolt) can reach the proxy VM:** a plain Layer‑4 TCP proxy
-works. Bolt is a binary protocol, not HTTP, so it needs nginx's `stream {}`
-module (`ngx_stream_module` — built into `nginx.org`'s official packages
-and most distro `nginx-full`/`nginx-extras` packages since nginx 1.9.2;
-confirm your specific build has it, e.g. `nginx -V 2>&1 | grep stream`).
-A minimal config:
+- **`helm_release.ingress_nginx`** installs the community ingress-nginx
+  controller into its own `ingress-nginx` namespace, from
+  `var.ingress_nginx_helm_repo_url` (a separate repo/project from Neo4j's
+  own charts — mirror it separately if needed, same proxy-cache
+  consideration as `neo4j_helm_repo_url` below).
+- **`helm_release.neo4j_reverse_proxy`** installs Neo4j's chart (from the
+  same repo/version line as `neo4j` itself, so it also honors
+  `neo4j_helm_repo_url`/`neo4j_helm_chart_version`), pointed at
+  `<neo4j_release_name>-lb-neo4j` — the name of the neo4j chart's own
+  shared external Service (confirmed against Neo4j's "Access the Neo4j
+  cluster from outside Kubernetes" doc) — with `ingress.host =
+  var.neo4j_reverse_proxy_host` and, if `neo4j_reverse_proxy_tls_secret_name`
+  is set, TLS termination against that existing Secret. **Required:** set
+  `neo4j_reverse_proxy_host` (used as the Ingress host) whenever this is
+  enabled — enforced by a `check` block, not a hard variable validation,
+  since it depends on another variable.
+- **Node placement — read this before enabling.** Both components run on
+  the AKS **system** node pool (`aks.tf`'s `default_node_pool`), which is
+  tainted `CriticalAddonsOnly=true:NoSchedule` specifically to keep
+  general workloads off it (see `aks.tf`'s comments) — it was sized for
+  cluster add-ons only, not real ingress traffic. `ingress.tf` schedules
+  onto it via an **explicit toleration** on just these two workloads
+  (using the `kubernetes.azure.com/mode: system` label AKS applies to
+  System-mode pools automatically as the `nodeSelector`) — that's a
+  deliberate, scoped exception, not a change to the taint itself, so
+  nothing else starts landing there. If you're routing meaningful traffic
+  through it, revisit `node_count`/`node_vm_size` (currently sized as if
+  only add-ons ran there) — this repo doesn't resize it automatically.
+  `neo4j_reverse_proxy` itself schedules onto the same tenant pool Neo4j
+  uses (`neo4j_node_pool_tier`), not the system pool — it's Neo4j-adjacent,
+  not a platform/ingress component.
+- **After `apply`:** `kubectl -n ingress-nginx get svc` to find the
+  controller's external IP, then point `neo4j_reverse_proxy_host`'s DNS
+  record at it. End users connect the same way they always would —
+  `neo4j://<reverse_proxy_host>` (or `neo4j+s://` once TLS is wired up) —
+  nothing Bolt-driver-specific to configure on their end; the WebSocket
+  tunneling is invisible to the driver.
+- TLS certificate provisioning itself (cert-manager, Key Vault, a manually
+  created Secret, etc.) is outside this stack — `neo4j_reverse_proxy_tls_secret_name`
+  only tells the chart which existing Secret to use.
 
-```nginx
-stream {
-    upstream neo4j_bolt {
-        server <internal-lb-or-service-ip>:7687;
-    }
-    server {
-        listen 7687;
-        proxy_pass neo4j_bolt;
-    }
-}
-```
-
-This is architecturally the same role AKS's own `services.neo4j`
-LoadBalancer already plays (see **High availability (clustering)** above)
-— Neo4j's own Kubernetes docs confirm connecting through such a proxy/LB
-works transparently for the `neo4j://` driver scheme via **server-side
-routing**: the driver connects once to whatever the proxy forwards it to,
-and Neo4j internally forwards reads/writes to the correct cluster member
-without the client needing direct connectivity to each member's real
-(internal-only) address. Practically, for a VM-based proxy in front of
-AKS instead of (or in addition to) the chart's own LoadBalancer Service:
-point `services.neo4j.spec.type` at an *internal* Azure LoadBalancer
-(`service.beta.kubernetes.io/azure-load-balancer-internal: "true"` in
-`services.neo4j.annotations`, on a subnet your nginx VM can reach) or a
-NodePort, and have nginx's `upstream` target that internal IP. End users
-then just connect to `neo4j://<nginx-vm-address>:7687` as if it were the
-database directly — nothing Bolt-driver-specific to configure on their
-end. Points worth planning for: TLS (decide whether nginx terminates
-`neo4j+s://`/`bolt+s://` or passes it through via `ssl_preread`), the
-proxy VM itself becoming a new single point of failure (put 2+ behind
-their own Azure LB, or `keepalived`), and open-source nginx only doing
-passive (not active) health checks against upstreams.
-
-**If only 80/443 egress is allowed** (no custom TCP port reachable at
-all), plain TCP passthrough on 7687 doesn't help — you need Bolt tunneled
-inside HTTP/WebSocket on 443, which is exactly what the `neo4j-reverse-proxy`
-chart above does. That chart runs its own multiplexing logic in front of
-`ingress-nginx` (itself nginx-based) rather than a generic `stream {}`
-proxy; replicating it on a standalone VM would mean running that same
-image (or equivalent WebSocket-upgrade-aware proxying) on the VM instead
-of plain TCP passthrough — a materially different, more involved setup
-than the 7687 case above.
+**If your actual goal is just "one shared front door" rather than
+"80/443-only egress,"** this specific setup is more than you need: a plain
+ingress-nginx `tcp-services` ConfigMap doing L4 passthrough straight to
+`services.neo4j` (Neo4j's own LoadBalancer Service, `neo4j.tf`) is simpler
+and works the same way described under **High availability (clustering)**
+above (server-side routing makes it transparent to the `neo4j://` driver
+either way) — that path isn't what `ingress.tf` sets up, since it's solving
+a different problem than Bolt-over-WebSocket tunneling. Say the word if
+that's actually what you want and I'll wire that up instead/as well.
 
 ### Multi-tenant identity model
 
@@ -419,6 +425,22 @@ policy). Given that, what was actually done:
   "Access the Neo4j cluster from outside Kubernetes" operations-manual
   page (fetched directly — see Sources), not asserted from general nginx/
   Bolt knowledge alone.
+- `terraform/ingress.tf`'s `helm_release.ingress_nginx`/
+  `helm_release.neo4j_reverse_proxy` values were rendered through Python's
+  `yaml` module the same way as `neo4j.tf`'s, to confirm the shape
+  matches each chart's own `values.yaml` (`controller.tolerations`/
+  `nodeSelector`/`service.type` for ingress-nginx;
+  `reverseProxy.serviceName`/`namespace`/`nodeSelector`/`tolerations`/
+  `ingress.{enabled,className,host,tls}` for `neo4j-reverse-proxy`). The
+  `<neo4j.name>-lb-neo4j` Service name used for `reverseProxy.serviceName`
+  matches the literal example in Neo4j's own "Access outside Kubernetes"
+  doc, not a guess. The ingress-nginx `tcp-services`
+  ConfigMap mechanism (mentioned as the alternative for a plain shared
+  front door, not implemented here) was checked against the
+  ingress-nginx project's own docs, not guessed. None of this was run
+  against a real cluster in this sandbox (no live AKS, and `helm.neo4j.com`/
+  `kubernetes.github.io`/`github.com` were all unreachable here — see the
+  chart-repo-access note above).
 - Every `azurerm_kubernetes_cluster`/`azurerm_kubernetes_cluster_node_pool`/
   `azurerm_key_vault` argument used here (`azure_active_directory_role_based_access_control`,
   `network_profile`, `key_vault_secrets_provider`, `microsoft_defender`,
@@ -464,6 +486,8 @@ against a real Neo4j instance before turning dry-run off.
 - [Configuring the Neo4j Helm chart repository — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/kubernetes/helm-charts-setup.adoc)
 - [Access the Neo4j cluster from outside Kubernetes — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/kubernetes/quickstart-cluster/access-outside-k8s.adoc)
 - [neo4j/helm-charts repo — chart index](https://raw.githubusercontent.com/neo4j/helm-charts/master/index.yaml) and [Chart.yaml/values.yaml for neo4j-reverse-proxy, neo4j-admin, neo4j-headless-service, neo4j-persistent-volume, neo4j-docker-desktop-pv](https://github.com/neo4j/helm-charts/tree/dev)
+- [Exposing TCP and UDP services — Ingress-Nginx Controller](https://kubernetes.github.io/ingress-nginx/user-guide/exposing-tcp-udp-services/)
+- [AKS system node pool restrictions (`only_critical_addons_enabled`) — Terraform `azurerm_kubernetes_cluster` docs](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster)
 - [azurerm_kubernetes_cluster (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster)
 - [azurerm_kubernetes_cluster_node_pool (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster_node_pool)
 - [azurerm_key_vault (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/key_vault)

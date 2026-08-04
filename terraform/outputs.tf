@@ -53,3 +53,13 @@ output "neo4j_oidc_configured" {
   description = "Whether OIDC/Entra auth config was applied to the Neo4j release (true once var.neo4j_oidc_client_id is set)."
   value       = var.neo4j_oidc_client_id != ""
 }
+
+output "neo4j_reverse_proxy_enabled" {
+  description = "Whether ingress-nginx + neo4j-reverse-proxy were deployed (var.neo4j_reverse_proxy_enabled)."
+  value       = var.neo4j_reverse_proxy_enabled
+}
+
+output "ingress_nginx_namespace" {
+  description = "Namespace the ingress-nginx controller was installed into, once neo4j_reverse_proxy_enabled = true. Find its external IP with `kubectl -n <this> get svc` (see README)."
+  value       = var.neo4j_reverse_proxy_enabled ? kubernetes_namespace.ingress_nginx[0].metadata[0].name : null
+}
