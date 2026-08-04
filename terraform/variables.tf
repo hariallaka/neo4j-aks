@@ -238,34 +238,10 @@ variable "neo4j_pipeline_client_secret" {
   sensitive   = true
 }
 
-variable "neo4j_reverse_proxy_enabled" {
+variable "neo4j_istio_gateway_enabled" {
   type        = bool
-  description = "Deploy Neo4j's own \"neo4j-reverse-proxy\" chart plus an Istio Gateway/VirtualService in front of it (see ingress.tf), tunneling Bolt and HTTP through a single host on 443 via WebSocket -- for end users who can only reach a raw HTTP(S) port, not Bolt's 7687 directly. Assumes Istio (istiod + an ingress gateway) is already installed/managed in this cluster outside this stack; this only creates the routing objects and the neo4j-reverse-proxy backend, plus a dedicated \"ingress\" node pool (node_pools.tf) for edge workloads -- it does not install Istio itself."
+  description = "Front Neo4j with the cluster's existing Istio ingress gateway (see ingress.tf): a Gateway + VirtualService doing plain TCP passthrough to services.neo4j (Bolt 7687 + Browser HTTP 7474), as a single shared front door. Assumes Istio (istiod + an ingress gateway) is already installed/managed in this cluster outside this stack -- this only creates the routing objects, not Istio itself. Deliberately doesn't tunnel Bolt over HTTP/WebSocket for 80/443-only egress -- see the README's Istio section if that's what you actually need."
   default     = false
-}
-
-variable "neo4j_reverse_proxy_host" {
-  type        = string
-  description = "Hostname end users connect to through the reverse proxy; used as the Istio Gateway/VirtualService host. Required when neo4j_reverse_proxy_enabled = true. DNS for this host and (if used) the TLS certificate itself are outside this stack -- point it at your Istio ingress gateway's LoadBalancer IP once known (see README)."
-  default     = ""
-}
-
-variable "neo4j_reverse_proxy_tls_secret_name" {
-  type        = string
-  description = "Name of an existing Kubernetes TLS Secret for the Istio Gateway to terminate TLS with (Gateway's `tls.credentialName`). Leave empty to run the Gateway as plain HTTP on port 80 instead. Note: Istio's ingress gateway typically needs this Secret to live in *its own* namespace (commonly istio-system), not the Neo4j namespace -- confirm against how your Istio install's SDS/credential access is configured; provisioning the certificate itself is outside this stack."
-  default     = ""
-}
-
-variable "ingress_pool_vm_size" {
-  type        = string
-  description = "VM size for the dedicated \"ingress\" node pool (node_pools.tf), used by the Istio ingress gateway and the neo4j-reverse-proxy pod. Only created when neo4j_reverse_proxy_enabled = true."
-  default     = "Standard_D4s_v5"
-}
-
-variable "ingress_pool_node_count" {
-  type        = number
-  description = "Node count for the dedicated \"ingress\" node pool. Only created when neo4j_reverse_proxy_enabled = true."
-  default     = 2
 }
 
 variable "istio_ingress_gateway_selector" {

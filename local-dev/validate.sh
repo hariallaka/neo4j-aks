@@ -22,8 +22,8 @@
 #                         internal mirror the same way terraform's
 #                         neo4j_helm_repo_url would (see README's proxy-cache note)
 #   SKIP_ISTIO=1          skip installing Istio and applying the Gateway/
-#                         VirtualService manifests (just validates the neo4j/
-#                         neo4j-reverse-proxy chart layer)
+#                         VirtualService manifests (just validates the neo4j
+#                         chart/clustering layer)
 
 set -euo pipefail
 
@@ -32,7 +32,6 @@ CLUSTER_NAME="neo4j-aks-local"
 NAMESPACE="neo4j"
 NEO4J_HELM_REPO_URL="${NEO4J_HELM_REPO_URL:-https://helm.neo4j.com/neo4j}"
 CLUSTER_SIZE=3
-REVERSE_PROXY_RELEASE="neo4j-aks-local-reverse-proxy"
 
 log()  { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33mWARNING: %s\033[0m\n' "$*" >&2; }
@@ -54,13 +53,13 @@ cmd_up() {
   if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
     log "kind cluster '$CLUSTER_NAME' already exists, reusing it (run './validate.sh down' first for a clean run)"
   else
-    log "Creating kind cluster with taints/labels mirroring workloadsize=small|large, workload=ingress"
+    log "Creating kind cluster with taints/labels mirroring workloadsize=small|large"
     kind create cluster --config "$SCRIPT_DIR/kind-cluster.yaml"
   fi
 
   kubectl config use-context "kind-$CLUSTER_NAME" >/dev/null
 
-  log "Node labels/taints (confirm these landed -- should show workloadsize=small|large and workload=ingress, one per worker)"
+  log "Node labels/taints (confirm these landed -- should show workloadsize=small|large, one per worker)"
   kubectl get nodes -o custom-columns='NAME:.metadata.name,LABELS:.metadata.labels,TAINTS:.spec.taints'
 
   log "Adding the neo4j Helm repo ($NEO4J_HELM_REPO_URL)"
@@ -91,14 +90,8 @@ cmd_up() {
   kubectl -n "$NAMESPACE" get pdb || true
 
   if [[ "${SKIP_ISTIO:-0}" == "1" ]]; then
-    log "SKIP_ISTIO=1 set -- skipping neo4j-reverse-proxy + Istio Gateway/VirtualService"
+    log "SKIP_ISTIO=1 set -- skipping Istio Gateway/VirtualService"
   else
-    log "Installing neo4j-reverse-proxy"
-    helm upgrade --install "$REVERSE_PROXY_RELEASE" neo4j/neo4j-reverse-proxy \
-      --namespace "$NAMESPACE" \
-      -f "$SCRIPT_DIR/values/neo4j-reverse-proxy-values.yaml" \
-      --wait --timeout 5m
-
     if command -v istioctl >/dev/null 2>&1; then
       if ! kubectl get namespace istio-system >/dev/null 2>&1; then
         log "Installing Istio (demo profile -- includes a real ingress gateway matching the default selector)"
