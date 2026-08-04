@@ -1,0 +1,51 @@
+# steps-bootstrap-pipeline-admin.yml
+#
+# Reusable step template: installs cypher-shell and runs
+# onboarding/scripts/render-and-run.sh bootstrap-pipeline-admin, which
+# ALWAYS uses native auth regardless of NEO4J_AUTH_MODE (see that action's
+# comments in render-and-run.sh and bootstrap-pipeline-admin.cypher.tpl)
+# -- so this template only needs the native credentials, not the OIDC ones.
+# Included from bootstrap-pipeline-admin-pipeline.yml.
+#
+# Run this ONCE, before ever setting neo4j_disable_native_auth = true --
+# see the main README's "OIDC-only authentication" section for the full
+# required order of operations.
+
+parameters:
+  - name: pipelineAdminUser
+    type: string
+  - name: pipelineEntraObjectId
+    type: string
+  - name: dryRun
+    type: boolean
+    default: true
+
+steps:
+  - bash: |
+      set -euo pipefail
+      sudo install -d -m 0755 /etc/apt/keyrings
+      wget -qO - https://debian.neo4j.com/neotechnology.gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/neotechnology.gpg
+      echo 'deb [signed-by=/etc/apt/keyrings/neotechnology.gpg] https://debian.neo4j.com stable latest' | sudo tee /etc/apt/sources.list.d/neo4j.list
+      sudo apt-get update
+      sudo apt-get install -y cypher-shell
+      cypher-shell --version
+    displayName: 'Install cypher-shell'
+
+  - bash: |
+      set -euo pipefail
+      chmod +x "$(Build.SourcesDirectory)/onboarding/scripts/render-and-run.sh"
+
+      dryRunFlag=""
+      if [ "${{ parameters.dryRun }}" = "True" ] || [ "${{ parameters.dryRun }}" = "true" ]; then
+        dryRunFlag="--dry-run"
+      fi
+
+      "$(Build.SourcesDirectory)/onboarding/scripts/render-and-run.sh" bootstrap-pipeline-admin \
+        "${{ parameters.pipelineAdminUser }}" \
+        "${{ parameters.pipelineEntraObjectId }}" \
+        ${dryRunFlag}
+    displayName: 'Bootstrap pipeline admin (OIDC-linked)'
+    env:
+      NEO4J_BOLT_URI: $(NEO4J_BOLT_URI)
+      NEO4J_ADMIN_USER: $(NEO4J_ADMIN_USER)
+      NEO4J_ADMIN_PASSWORD: $(NEO4J_ADMIN_PASSWORD)

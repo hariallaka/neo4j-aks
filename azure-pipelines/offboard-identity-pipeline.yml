@@ -25,8 +25,17 @@ variables:
   - group: neo4j-onboarding-secrets
   - name: NEO4J_BOLT_URI
     value: 'neo4j+s://neo4j-aks.example.internal:7687' # replace with your Bolt endpoint
+  - name: NEO4J_AUTH_MODE
+    value: 'native' # "native" (default) or "oidc" -- see onboard-tenant-pipeline.yml's header comment
   - name: NEO4J_ADMIN_USER
-    value: 'svc_provisioning'
+    value: 'svc_provisioning' # only used when NEO4J_AUTH_MODE = native
+  # Only used when NEO4J_AUTH_MODE = oidc.
+  - name: ENTRA_TENANT_ID
+    value: ''
+  - name: PIPELINE_CLIENT_ID
+    value: ''
+  - name: NEO4J_OIDC_AUDIENCE_SCOPE
+    value: ''
 
 stages:
   - stage: OffboardIdentity

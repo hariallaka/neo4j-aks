@@ -10,8 +10,13 @@ resource "kubernetes_namespace" "neo4j" {
 # generated during installation" -- generating it here instead so Terraform
 # can output it (and store a copy in Key Vault, see keyvault.tf) rather than
 # reading it back out of pod logs. This remains the native-auth admin
-# credential used by the onboarding pipeline even after OIDC is configured
-# below (see README for why `native` stays enabled alongside OIDC).
+# credential used to bootstrap OIDC access in the first place (see
+# onboarding/cypher/bootstrap-pipeline-admin.cypher.tpl) even once
+# var.neo4j_disable_native_auth turns off native login for everyone else --
+# it's still what Terraform itself used to set the initial password, and
+# stays valid unless/until you also disable native auth, at which point
+# this password stops being able to authenticate at all (see README's
+# "OIDC-only authentication" section).
 resource "random_password" "neo4j" {
   length  = 24
   special = false
@@ -27,10 +32,17 @@ resource "random_password" "neo4j" {
 # roles they hold is still decided natively via GRANT ROLE, per the
 # per-identity CREATE USER ... SET AUTH 'oidc-azure' {...} pattern in
 # onboarding/cypher/onboard-tenant.cypher.tpl -- not by mapping Entra
-# groups/app-roles directly to Neo4j roles.
+# groups/app-roles directly to Neo4j roles. This stays "native" regardless
+# of neo4j_disable_native_auth, which only affects *authentication*
+# (accepting a password at all), not this authorization/role-resolution
+# mechanism.
 locals {
+  # "oidc-azure" only (no ",native") once neo4j_disable_native_auth is set
+  # -- see the check block below for the prerequisite this depends on.
+  neo4j_authentication_providers = var.neo4j_disable_native_auth ? "oidc-azure" : "oidc-azure,native"
+
   neo4j_oidc_config = var.neo4j_oidc_client_id != "" ? {
-    "dbms.security.authentication_providers" = "oidc-azure,native"
+    "dbms.security.authentication_providers" = local.neo4j_authentication_providers
     "dbms.security.authorization_providers"  = "native"
     "dbms.security.require_local_user"       = "true"
 
@@ -132,16 +144,20 @@ locals {
   }
 }
 
-# Official Neo4j chart (neo4j/helm-charts, repo https://helm.neo4j.com/neo4j,
-# chart name "neo4j" -- confirmed against the chart's own values.yaml, not
-# the older/deprecated neo4j-contrib/neo4j-helm chart).
+# Official Neo4j chart (neo4j/helm-charts, repo https://helm.neo4j.com/neo4j
+# by default -- chart name "neo4j" -- confirmed against the chart's own
+# values.yaml, not the older/deprecated neo4j-contrib/neo4j-helm chart).
+# Only created when var.neo4j_deployment_method = "helm_release" (the
+# default); see neo4j-helm-cli.tf for the null_resource/helm-CLI
+# alternative.
 resource "helm_release" "neo4j" {
-  for_each = local.neo4j_release_names
+  for_each = var.neo4j_deployment_method == "helm_release" ? local.neo4j_release_names : {}
 
   name       = each.value
   namespace  = kubernetes_namespace.neo4j.metadata[0].name
-  repository = "https://helm.neo4j.com/neo4j"
+  repository = var.neo4j_helm_repo_url
   chart      = "neo4j"
+  version    = var.neo4j_helm_chart_version != "" ? var.neo4j_helm_chart_version : null
 
   values = [yamlencode(local.neo4j_helm_values)]
 
@@ -194,5 +210,20 @@ check "neo4j_node_pool_capacity" {
   assert {
     condition     = var.neo4j_cluster_size <= (var.neo4j_node_pool_tier == "small" ? var.small_pool_node_count : var.large_pool_node_count)
     error_message = "neo4j_cluster_size exceeds the node count of the target node pool (neo4j_node_pool_tier). The chart's default podAntiAffinity keeps two members off the same node, so the pool needs at least neo4j_cluster_size nodes or some member pods will stay Pending."
+  }
+}
+
+# This can only check that OIDC is configured at all -- it cannot verify
+# you've actually run the bootstrap-pipeline-admin.cypher.tpl step first
+# (that's an out-of-band Cypher action, invisible to Terraform) or that the
+# pipeline's OIDC login has been tested end to end. Skipping either of
+# those before setting neo4j_disable_native_auth = true locks out every
+# native credential, including this stack's own admin password, with no
+# fallback -- see the README's "OIDC-only authentication" section for the
+# required order of operations.
+check "neo4j_disable_native_auth_requirements" {
+  assert {
+    condition     = !var.neo4j_disable_native_auth || var.neo4j_oidc_client_id != ""
+    error_message = "neo4j_disable_native_auth = true requires neo4j_oidc_client_id to already be set -- OIDC must be configured (and, per the README, bootstrapped and verified working) before native auth can be turned off."
   }
 }

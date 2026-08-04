@@ -35,3 +35,32 @@ resource "azurerm_kubernetes_cluster_node_pool" "large" {
     "workloadsize=large:NoSchedule",
   ]
 }
+
+# Dedicated pool for ingress/edge workloads -- the Istio ingress gateway
+# and the neo4j-reverse-proxy pod (see ingress.tf) -- kept off both the
+# tenant small/large pools above and the AKS system pool (aks.tf), which
+# is tainted CriticalAddonsOnly=true:NoSchedule for cluster add-ons only.
+# Only created when var.neo4j_reverse_proxy_enabled.
+#
+# This pool creating the toleration/label pair doesn't by itself move an
+# already-installed Istio ingress gateway onto it -- that gateway's own
+# Deployment (managed outside this repo) needs a matching nodeSelector/
+# toleration added on its side too. See the README's reverse-proxy section
+# for the exact values to hand to whoever manages that install.
+resource "azurerm_kubernetes_cluster_node_pool" "ingress" {
+  count = var.neo4j_reverse_proxy_enabled ? 1 : 0
+
+  name                  = "ingress"
+  kubernetes_cluster_id = azurerm_kubernetes_cluster.this.id
+  mode                  = "User"
+  vm_size               = var.ingress_pool_vm_size
+  node_count            = var.ingress_pool_node_count
+
+  node_labels = {
+    workload = "ingress"
+  }
+
+  node_taints = [
+    "workload=ingress:NoSchedule",
+  ]
+}

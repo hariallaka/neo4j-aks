@@ -6,3 +6,7 @@ terraform.tfvars
 *.auto.tfvars
 kubeconfig
 crash.log
+
+# Rendered Neo4j Helm values written by neo4j-helm-cli.tf when
+# neo4j_deployment_method = "helm_cli".
+.neo4j-values/

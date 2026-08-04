@@ -1,0 +1,52 @@
+# bootstrap-pipeline-admin-pipeline.yml
+#
+# On-demand, run-once pipeline: creates a Neo4j user for this onboarding
+# pipeline's OWN Entra app registration/service principal (linked via
+# oidc-azure) and grants it the built-in `admin` role. This is the
+# prerequisite for switching the onboard/offboard pipelines over to
+# NEO4J_AUTH_MODE=oidc, and MUST run successfully, using native auth,
+# before terraform.tfvars ever sets neo4j_disable_native_auth = true --
+# see the main README's "OIDC-only authentication" section for the full
+# required order of operations.
+#
+# Requires the same self-hosted agent pool + neo4j-onboarding-secrets
+# variable group as onboard-tenant-pipeline.yml (see azure-pipelines/README.md).
+
+trigger: none
+pr: none
+
+pool:
+  name: 'self-hosted-neo4j' # replace with your agent pool
+
+parameters:
+  - name: pipelineAdminUser
+    displayName: 'Neo4j user name for the pipeline''s own OIDC identity'
+    type: string
+    default: 'svc_pipeline_admin'
+
+  - name: pipelineEntraObjectId
+    displayName: 'Entra ID Object ID of the pipeline''s own app registration/service principal'
+    type: string
+
+  - name: dryRun
+    displayName: 'Dry run (render Cypher without executing)'
+    type: boolean
+    default: true
+
+variables:
+  - group: neo4j-onboarding-secrets
+  - name: NEO4J_BOLT_URI
+    value: 'neo4j+s://neo4j-aks.example.internal:7687' # replace with your Bolt endpoint
+  - name: NEO4J_ADMIN_USER
+    value: 'svc_provisioning' # native admin account -- must still work; this pipeline doesn't use OIDC auth itself
+
+stages:
+  - stage: BootstrapPipelineAdmin
+    jobs:
+      - job: Bootstrap
+        steps:
+          - template: templates/steps-bootstrap-pipeline-admin.yml
+            parameters:
+              pipelineAdminUser: ${{ parameters.pipelineAdminUser }}
+              pipelineEntraObjectId: ${{ parameters.pipelineEntraObjectId }}
+              dryRun: ${{ parameters.dryRun }}

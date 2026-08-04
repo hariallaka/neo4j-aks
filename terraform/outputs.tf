@@ -34,8 +34,13 @@ output "neo4j_cluster_size" {
 }
 
 output "neo4j_release_names" {
-  description = "Helm release name for each Neo4j cluster member. All members share neo4j.name (var.neo4j_release_name) and are selectable together via the label helm.neo4j.com/neo4j.name=<neo4j_release_name>."
-  value       = [for r in helm_release.neo4j : r.name]
+  description = "Helm release name for each Neo4j cluster member, regardless of neo4j_deployment_method. All members share neo4j.name (var.neo4j_release_name) and are selectable together via the label helm.neo4j.com/neo4j.name=<neo4j_release_name>."
+  value       = values(local.neo4j_release_names)
+}
+
+output "neo4j_deployment_method" {
+  description = "Which mechanism deployed the Neo4j release(s): \"helm_release\" (Terraform's native resource) or \"helm_cli\" (null_resource + local helm CLI)."
+  value       = var.neo4j_deployment_method
 }
 
 output "neo4j_initial_password" {
@@ -47,4 +52,29 @@ output "neo4j_initial_password" {
 output "neo4j_oidc_configured" {
   description = "Whether OIDC/Entra auth config was applied to the Neo4j release (true once var.neo4j_oidc_client_id is set)."
   value       = var.neo4j_oidc_client_id != ""
+}
+
+output "neo4j_authentication_providers" {
+  description = "The literal dbms.security.authentication_providers value applied -- \"oidc-azure,native\" (both), \"oidc-azure\" (native disabled, var.neo4j_disable_native_auth = true), or unset if OIDC isn't configured at all yet."
+  value       = var.neo4j_oidc_client_id != "" ? local.neo4j_authentication_providers : null
+}
+
+output "neo4j_pipeline_client_secret_stored" {
+  description = "Whether var.neo4j_pipeline_client_secret was supplied and stored in Key Vault as neo4j-pipeline-client-secret."
+  value       = var.neo4j_pipeline_client_secret != ""
+}
+
+output "neo4j_reverse_proxy_enabled" {
+  description = "Whether the neo4j-reverse-proxy chart + Istio Gateway/VirtualService were deployed (var.neo4j_reverse_proxy_enabled)."
+  value       = var.neo4j_reverse_proxy_enabled
+}
+
+output "neo4j_reverse_proxy_service" {
+  description = "In-cluster DNS name of the neo4j-reverse-proxy Service that the Istio Gateway/VirtualService route to, once neo4j_reverse_proxy_enabled = true."
+  value       = var.neo4j_reverse_proxy_enabled ? "${local.neo4j_reverse_proxy_service_name}.${kubernetes_namespace.neo4j.metadata[0].name}.svc.cluster.local" : null
+}
+
+output "ingress_node_pool_name" {
+  description = "Name of the dedicated \"ingress\" node pool, once neo4j_reverse_proxy_enabled = true. Give this pool's label/taint (workload=ingress) to whoever manages your Istio ingress gateway install if you want its pods scheduled here too -- see README."
+  value       = var.neo4j_reverse_proxy_enabled ? azurerm_kubernetes_cluster_node_pool.ingress[0].name : null
 }

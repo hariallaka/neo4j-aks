@@ -1,8 +1,13 @@
 # steps-offboard-identity.yml
 #
-# Reusable step template: installs cypher-shell and runs
+# Reusable step template: installs cypher-shell (native auth) and the
+# Python neo4j driver (OIDC auth -- see run_cypher_oidc.py), then runs
 # onboarding/scripts/render-and-run.sh offboard for the given identity.
 # Included from offboard-identity-pipeline.yml (or your own pipeline).
+#
+# See steps-onboard-tenant.yml's header comment for why both toolchains
+# are installed unconditionally -- NEO4J_AUTH_MODE picks which one is
+# actually used at runtime.
 
 parameters:
   - name: identityName
@@ -20,7 +25,12 @@ steps:
       sudo apt-get update
       sudo apt-get install -y cypher-shell
       cypher-shell --version
-    displayName: 'Install cypher-shell'
+    displayName: 'Install cypher-shell (native auth)'
+
+  - bash: |
+      set -euo pipefail
+      python3 -m pip install --quiet --upgrade neo4j
+    displayName: 'Install neo4j Python driver (OIDC auth)'
 
   - bash: |
       set -euo pipefail
@@ -37,5 +47,10 @@ steps:
     displayName: 'Offboard identity'
     env:
       NEO4J_BOLT_URI: $(NEO4J_BOLT_URI)
+      NEO4J_AUTH_MODE: $(NEO4J_AUTH_MODE)
       NEO4J_ADMIN_USER: $(NEO4J_ADMIN_USER)
       NEO4J_ADMIN_PASSWORD: $(NEO4J_ADMIN_PASSWORD)
+      ENTRA_TENANT_ID: $(ENTRA_TENANT_ID)
+      PIPELINE_CLIENT_ID: $(PIPELINE_CLIENT_ID)
+      PIPELINE_CLIENT_SECRET: $(PIPELINE_CLIENT_SECRET)
+      NEO4J_OIDC_AUDIENCE_SCOPE: $(NEO4J_OIDC_AUDIENCE_SCOPE)

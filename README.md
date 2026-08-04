@@ -12,6 +12,7 @@ principal) access via Neo4j's native OIDC/SSO support.
 terraform/            AKS cluster, node pools, Key Vault, Neo4j Helm release.
 onboarding/            Cypher templates + shell runner to onboard/offboard a tenant or identity.
 azure-pipelines/       Azure DevOps pipeline YAML that runs the onboarding scripts on demand.
+local-dev/             kind-based local harness for validating the Kubernetes/Helm/Istio layer without a real AKS cluster.
 ```
 
 ## Architecture
@@ -110,6 +111,186 @@ that isn't purely a technical trial; the `check` blocks in `neo4j.tf`
 only validate the *edition*/*license-flag* combination is internally
 consistent, not that your specific license covers clustering.
 
+### Deployment method: `helm_release` vs `helm_cli`
+
+`var.neo4j_deployment_method` picks how the chart actually gets installed:
+
+- **`"helm_release"`** (default) — Terraform's native `helm_release`
+  resource (`helm_release.neo4j` in `neo4j.tf`), talking to the chart repo
+  via the Terraform helm provider's own Go SDK.
+- **`"helm_cli"`** — `neo4j-helm-cli.tf` instead renders the same values to
+  a local file per member (`local_file.neo4j_values`) and shells out to
+  whatever `helm` binary is on the machine running `terraform apply`
+  (`null_resource.neo4j_helm_cli`, via a `local-exec` provisioner running
+  `helm upgrade --install`). Use this if that machine's `helm` is already
+  set up to reach the chart repo (proxy env vars, an internal mirror
+  trusted by its CA bundle, etc.) in a way the Terraform helm provider
+  can't easily be pointed at the same way. Requires `helm` and a working
+  `kubectl`/kubeconfig context on that machine; `terraform plan` can't show
+  chart-internal diffs for this path the way it can for `helm_release` —
+  Terraform only sees an opaque `null_resource` that re-runs whenever the
+  rendered values' hash (`values_sha256` trigger) changes.
+- Only one method's resources exist per apply (the other's `for_each` is
+  empty). **Switching methods on an already-deployed cluster doesn't
+  migrate anything** — the newly-inactive method's resources drop out of
+  Terraform's state, but the underlying Helm release stays installed in
+  Kubernetes until you `helm uninstall` it by hand (or `terraform destroy`
+  before switching).
+
+### Chart repository access behind a proxy (exact URLs)
+
+`var.neo4j_helm_repo_url` (default `https://helm.neo4j.com/neo4j`) is what
+`helm repo add`/the Terraform helm provider's `repository` argument
+resolves against — point it at an internal proxy/mirror if
+`helm.neo4j.com` itself isn't reachable from your network. What that URL
+actually needs to serve, concretely:
+
+- **`<repo_url>/index.yaml`** — the chart repo index. For `neo4j`, this is
+  a standard Helm `apiVersion: v1` index; the current entries' `urls:`
+  fields point to `.tgz` chart packages.
+- **The chart packages themselves are *not* hosted under `helm.neo4j.com`**
+  — the index's `urls:` entries point straight at GitHub Releases, e.g.
+  `https://github.com/neo4j/helm-charts/releases/download/2026.6.0/neo4j-2026.6.0.tgz`.
+  So `helm.neo4j.com` is effectively just the index; the actual `.tgz`
+  download always goes to `github.com`/`objects.githubusercontent.com`
+  regardless of what `neo4j_helm_repo_url` points at, unless your mirror
+  also rewrites those `urls:` entries to itself (which is exactly what an
+  Artifactory/Nexus/Harbor "generic remote" Helm repo type does — it
+  proxies the index *and* re-writes/caches the package URLs so clients
+  never touch `github.com` directly).
+- The same `index.yaml` content is also mirrored as a plain file in the
+  `neo4j/helm-charts` GitHub repo itself, on its **`master`** branch (not
+  `dev`, and there's no `gh-pages` branch): fetchable at
+  `https://raw.githubusercontent.com/neo4j/helm-charts/master/index.yaml`.
+  If your network already allows `raw.githubusercontent.com` but not
+  `helm.neo4j.com`, this is a way to inspect available chart
+  versions/URLs without needing `helm.neo4j.com` at all — but it doesn't
+  by itself solve chart *downloads*, since the `urls:` inside it still
+  point at `github.com/neo4j/helm-charts/releases/download/...`.
+- Practical options for a proxy cache, in order of how much they insulate
+  you from `helm.neo4j.com`/`github.com` outages or access issues:
+  1. An internal Helm "generic remote" repo (Artifactory/Nexus/Harbor)
+     configured to proxy `https://helm.neo4j.com/neo4j` — handles both the
+     index and the package rewrite/caching automatically; point
+     `neo4j_helm_repo_url` at your internal repo's URL.
+  2. If only `github.com`/`raw.githubusercontent.com` are reachable (not
+     `helm.neo4j.com`), download the specific chart `.tgz` you need
+     directly from `github.com/neo4j/helm-charts/releases`, push it into
+     an internal generic/OCI registry yourselves, and point
+     `neo4j_helm_repo_url`/the chart source at that instead.
+  3. `helm pull` the `.tgz` once (from wherever it *is* reachable) and use
+     a local chart path — the Terraform helm provider's `chart` argument
+     also accepts a filesystem path, not just a repo+chart name, if you'd
+     rather vendor the chart into this repo than depend on any remote repo
+     at apply time.
+
+### Other Neo4j Helm charts in this monorepo
+
+`neo4j/helm-charts` (same repo the `neo4j` chart comes from) ships several
+other charts alongside it, all versioned/released together. None of these
+are wired into this Terraform stack today — this is what they're for, if
+you want to add them:
+
+| Chart | What it does | Relevant here? |
+|---|---|---|
+| `neo4j` | The DBMS itself — what `neo4j.tf` deploys. | Already used. |
+| `neo4j-admin` | A scheduled backup `CronJob` (despite the name, it's backups, not a general admin console) — runs `neo4j-admin database backup` against a running instance/cluster on a cron schedule, to cloud storage or a PVC. | Worth adding if you need automated backups; not currently in this stack. |
+| `neo4j-headless-service` | An additional headless (`clusterIP: None`) Service selecting all members sharing a `neo4j.name`, for stable per-pod internal DNS names instead of (or alongside) the chart's own default/LoadBalancer Services. | Optional; `neo4j.tf`'s per-member Services already provide internal addressing. Its own docs note it's a valid backend target for `neo4j-reverse-proxy` below. |
+| `neo4j-persistent-volume` / `neo4j-docker-desktop-pv` | Pre-provision disks/PVs for the `neo4j` chart to bind to, for storage setups where dynamic provisioning (what `neo4j.tf` uses via `managed-csi`) isn't the right fit, or for local Docker Desktop Kubernetes. | Not needed here — AKS's `managed-csi` dynamic provisioning already covers this. |
+| `neo4j-reverse-proxy` | Deploys a small reverse-proxy pod that fronts both HTTP (Browser) and Bolt traffic behind a single port via WebSocket tunneling, wired through an `ingress-nginx` or `haproxy-ingress` Kubernetes Ingress. Built for networks where only 80/443 egress is allowed. | **Wired in** — see the next section (`terraform/ingress.tf`, `var.neo4j_reverse_proxy_enabled`). |
+
+### Fronting Neo4j through Istio (`terraform/ingress.tf`)
+
+`var.neo4j_reverse_proxy_enabled` (default `false`) deploys **Neo4j's own
+`neo4j-reverse-proxy` chart plus an Istio `Gateway`/`VirtualService`**, for
+end users who can only reach a raw HTTP(S) port (443) — not Bolt's 7687
+directly. **This assumes Istio (istiod + an ingress gateway) is already
+installed and managed in this AKS cluster outside this stack** — `ingress.tf`
+doesn't install Istio itself, only the routing objects and the
+`neo4j-reverse-proxy` backend they point at. A Kubernetes `Ingress`/Istio
+`VirtualService` is HTTP(S)-only by design, so plain TCP can't go through
+it — `neo4j-reverse-proxy` is what actually tunnels Bolt over WebSocket;
+Istio just routes normal HTTP(S) traffic to that pod like any other
+backend. Istio/Envoy handles the WebSocket upgrade automatically for HTTP
+routes — no special `VirtualService` config needed for that part.
+
+- **`helm_release.neo4j_reverse_proxy`** installs Neo4j's chart (same
+  repo/version line as `neo4j` itself, so it also honors
+  `neo4j_helm_repo_url`/`neo4j_helm_chart_version`), pointed at
+  `<neo4j_release_name>-lb-neo4j` — the neo4j chart's own shared external
+  Service (confirmed against Neo4j's "Access the Neo4j cluster from
+  outside Kubernetes" doc). The chart's **own** `reverseProxy.ingress` is
+  left `enabled: false` — Istio does the routing, not a chart-managed
+  `Ingress` object — but its Service (`<release>-reverseproxy-service`)
+  is still created and is what the `VirtualService` targets.
+- **`kubectl_manifest.neo4j_reverse_proxy_gateway`** — an Istio `Gateway`
+  binding to your **existing** ingress gateway workload via
+  `var.istio_ingress_gateway_selector` (default `{istio:
+  ingressgateway}`, Istio's own default label — override if yours differs)
+  rather than provisioning a new gateway. Listens on 443/HTTPS with
+  `tls.credentialName = neo4j_reverse_proxy_tls_secret_name` if set, else
+  plain 80/HTTP.
+- **`kubectl_manifest.neo4j_reverse_proxy_virtualservice`** — routes
+  `neo4j_reverse_proxy_host` through that Gateway to the reverse-proxy
+  Service. Both CRD resources go through the `gavinbunney/kubectl`
+  provider's `kubectl_manifest` (added in `versions.tf`/`providers.tf`) —
+  the mainline `hashicorp/kubernetes` provider has no generic resource for
+  arbitrary CRDs, and Istio's own CRDs obviously aren't installed by this
+  stack for a typed provider to target. **Required:**
+  `neo4j_reverse_proxy_host` whenever this is enabled — enforced by a
+  `check` block (depends on another variable, so it can't be a plain
+  variable `validation`).
+- **TLS secret location — an Istio-specific gotcha.** Istio's ingress
+  gateway typically needs `tls.credentialName`'s Secret to live in **its
+  own** namespace (commonly `istio-system`), not the Neo4j namespace,
+  for its SDS credential access to see it — confirm this against however
+  your specific Istio install is configured (cross-namespace secret
+  discovery is possible but not default). Provisioning the certificate
+  itself (cert-manager, Key Vault, a manually created Secret) is outside
+  this stack either way.
+- **Node placement.** Both the `neo4j-reverse-proxy` pod and (once
+  someone points the existing gateway install at it — see next) the Istio
+  ingress gateway itself run on a **dedicated `ingress` node pool**
+  (`azurerm_kubernetes_cluster_node_pool.ingress` in `node_pools.tf`, only
+  created when `neo4j_reverse_proxy_enabled = true`) — not the tenant
+  `small`/`large` pools Neo4j uses, and not the AKS system pool. Sized via
+  `ingress_pool_vm_size`/`ingress_pool_node_count`.
+- **This repo creating the `ingress` pool does not, by itself, move the
+  already-installed Istio ingress gateway onto it** — that gateway's
+  Deployment is managed outside this repo, so someone needs to add a
+  matching `nodeSelector`/`toleration` on that side:
+  ```yaml
+  nodeSelector:
+    workload: ingress
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: ingress
+      effect: NoSchedule
+  ```
+  (`terraform output ingress_node_pool_name` confirms the pool exists once
+  applied.) Until that's done, the gateway keeps running wherever it runs
+  today — routing still works either way, since Istio's Gateway/
+  VirtualService bind by pod label, not by node pool.
+- **After `apply`:** find your Istio ingress gateway's external IP (however
+  you normally do — e.g. `kubectl -n istio-system get svc`) and point
+  `neo4j_reverse_proxy_host`'s DNS record at it. End users then connect the
+  same way they always would — `neo4j://<reverse_proxy_host>` (or
+  `neo4j+s://` once TLS is wired up) — nothing Bolt-driver-specific to
+  configure on their end; the WebSocket tunneling is invisible to the
+  driver.
+
+**If your actual goal is just "one shared front door" rather than
+"80/443-only egress,"** this specific setup is more than you need: a plain
+Istio `Gateway` with `protocol: TCP` (or `TLS` for passthrough), routing
+straight to `services.neo4j` (Neo4j's own LoadBalancer Service, `neo4j.tf`)
+via a `TCPRoute`-style `VirtualService`, is simpler and works the same way
+described under **High availability (clustering)** above (server-side
+routing makes it transparent to the `neo4j://` driver either way) — that
+isn't what `ingress.tf` sets up, since it's solving a different problem
+than Bolt-over-WebSocket tunneling. Say the word if that's actually what
+you want and I'll wire that up instead/as well.
+
 ### Multi-tenant identity model
 
 Rather than mapping Entra groups/app-roles directly to Neo4j roles, each
@@ -130,11 +311,15 @@ against Neo4j — no Microsoft Graph API calls to manage Entra app role
 assignments — and (b) revoking one identity never affects another's access
 to the same tenant.
 
-`neo4j.conf` keeps `authentication_providers = "oidc-azure,native"` and
-`authorization_providers = "native"` permanently (not switching to
-OIDC-only): the onboarding pipeline itself authenticates as a native admin
-account (password from Key Vault), which is the standard pattern for
-automation — see the comments in `neo4j.tf`.
+`neo4j.conf` keeps `authorization_providers = "native"` regardless: roles
+are always resolved via `GRANT ROLE`, not by mapping Entra groups/app-roles
+directly. `authentication_providers` defaults to `"oidc-azure,native"` —
+the onboarding pipeline authenticates as a native admin account (password
+from Key Vault), the standard pattern for automation — but can be switched
+to OIDC-only (`"oidc-azure"`, no password login for anyone, including that
+pipeline) via `var.neo4j_disable_native_auth`. See **OIDC-only
+authentication** below before doing that — see the comments in `neo4j.tf`
+either way.
 
 ## One-time Entra ID setup
 
@@ -173,6 +358,72 @@ via [jwt.ms](https://jwt.ms)) before relying on it as the value passed to
 doesn't populate `sub` for app-only tokens, switch
 `dbms.security.oidc.azure.claims.username` to `oid` instead (and adjust
 what value you onboard identities with to match).
+
+## OIDC-only authentication (disabling native/password login)
+
+By default, both Entra SSO (`oidc-azure`) and native (password) login are
+accepted (`dbms.security.authentication_providers = "oidc-azure,native"`).
+Setting `var.neo4j_disable_native_auth = true` drops `native` from that
+list — no username/password login works anymore, for anyone, once applied.
+
+**The actual blast radius is narrower than it sounds.** Every tenant
+identity onboarded via `onboard-tenant.cypher.tpl` is already OIDC-only —
+it's created with `SET AUTH 'oidc-azure' {...}` and never had a password
+in the first place. This setting only affects the two things in this stack
+that still use a native password today: the built-in `neo4j` admin account,
+and the onboarding pipeline's own login (`NEO4J_ADMIN_USER`/`NEO4J_ADMIN_PASSWORD`).
+
+**The catch: Neo4j's auth-provider list is all-or-nothing** — there's no
+"OIDC for humans, password still OK for this one automation account."
+Disabling `native` breaks the onboarding pipeline's own login at the same
+moment it breaks everyone else's password login, and removes any password
+fallback if Entra/OIDC ever misbehaves. Doing this properly means the
+pipeline also authenticates via OIDC (a client-credentials token, not a
+password) — which is what the pieces below set up.
+
+### Required rollout order
+
+Skipping the order below (in particular, disabling native auth before step
+2 succeeds) locks out every native credential — including this stack's own
+generated admin password — with **no fallback**.
+
+1. **Configure OIDC** per the section above (`neo4j_oidc_client_id` set),
+   with `neo4j_disable_native_auth` still `false` (the default). Also
+   register a **second, separate** Entra app registration/service
+   principal — this one for the onboarding pipeline itself to authenticate
+   *as* (distinct from the Neo4j SSO app registration above, which is the
+   audience the pipeline requests a token *for*). Set its client secret as
+   `neo4j_pipeline_client_secret` in `terraform.tfvars` and re-apply —
+   Terraform stores it in Key Vault as `neo4j-pipeline-client-secret`.
+2. **Bootstrap the pipeline's own OIDC identity**: run
+   `azure-pipelines/bootstrap-pipeline-admin-pipeline.yml` (or
+   `onboarding/scripts/render-and-run.sh bootstrap-pipeline-admin
+   <user-name> <pipeline-service-principal-object-id>` directly) — this
+   uses native auth (still enabled at this point) to create a Neo4j user
+   linked to the pipeline's Entra identity and grant it the built-in
+   `admin` role. See `onboarding/cypher/bootstrap-pipeline-admin.cypher.tpl`.
+3. **Verify OIDC auth actually works end to end**: set `NEO4J_AUTH_MODE=oidc`
+   (plus `ENTRA_TENANT_ID`/`PIPELINE_CLIENT_ID`/`PIPELINE_CLIENT_SECRET`/
+   `NEO4J_OIDC_AUDIENCE_SCOPE`) and run a real onboard/offboard — see
+   `onboarding/README.md`'s "OIDC-only clusters" section — before touching
+   the config flag that removes the fallback.
+4. **Only then** set `neo4j_disable_native_auth = true` in
+   `terraform.tfvars` and re-apply, and switch
+   `onboard-tenant-pipeline.yml`/`offboard-identity-pipeline.yml` over to
+   `NEO4J_AUTH_MODE: 'oidc'` for good (see `azure-pipelines/README.md`).
+
+### Why cypher-shell isn't used for the OIDC path
+
+cypher-shell has no documented flag for bearer/access-token auth (checked
+directly against Neo4j's own `cypher-shell.adoc` — only `-u`/`-p`/
+`--impersonate` are listed). `onboarding/scripts/run_cypher_oidc.py` uses
+the neo4j Python driver's `bearer_auth()` instead — Neo4j's own documented
+mechanism for OIDC service-account/automation access (see Sources) — to
+request a client-credentials token from Entra and run the rendered Cypher
+against Neo4j with it. `render-and-run.sh` dispatches between it and
+cypher-shell based on `NEO4J_AUTH_MODE`; `bootstrap-pipeline-admin` always
+forces native/cypher-shell regardless of that setting, since it's what
+makes the OIDC path possible in the first place.
 
 ## Onboarding a tenant / identity
 
@@ -225,6 +476,14 @@ and whose network egress policy blocks `registry.terraform.io` (confirmed
 via a 403 on `terraform init` — not something to route around per that
 policy). Given that, what was actually done:
 
+**Local validation:** there's no local emulator for AKS/Azure itself, but
+`local-dev/` has a `kind`-based harness that validates the Kubernetes/
+Helm/Istio layer (chart values, taints/tolerations, clustering, Istio
+`Gateway`/`VirtualService`) against a real local Kubernetes API server —
+see `local-dev/README.md` for what it does and doesn't prove, and its own
+caveats about not having been run end-to-end in this sandbox either (no
+Docker daemon here).
+
 - `terraform fmt -check -diff -recursive` passes clean on every `.tf` file
   (the `neo4j_cluster_size`/multi-release changes were hand-aligned to
   match, since this sandbox has no `terraform` binary to run `fmt` with —
@@ -250,6 +509,86 @@ policy). Given that, what was actually done:
   are strings in the `hashicorp/kubernetes` provider (checked against the
   provider docs) — `neo4j.tf` wraps the computed value in `tostring()`
   accordingly.
+- `neo4j-helm-cli.tf`'s rendered `helm upgrade --install ...` command was
+  built and printed with real sample values in Python to confirm the flag
+  ordering/quoting is sane; the `local-exec`/`null_resource` mechanics
+  themselves weren't run end-to-end (no `helm`/cluster in this sandbox).
+- The chart repo's actual URL structure (`<repo>/index.yaml`, and that its
+  `urls:` entries point at `github.com/neo4j/helm-charts/releases/download/...`
+  rather than staying under `helm.neo4j.com`) was confirmed by fetching the
+  same index content mirrored at
+  `raw.githubusercontent.com/neo4j/helm-charts/master/index.yaml` — direct
+  requests to `helm.neo4j.com` and `github.com` itself were both blocked
+  in this sandbox's network policy, consistent with what was reported
+  about the target enterprise network, so this was checked via the one
+  path (`raw.githubusercontent.com`) that was reachable, not guessed.
+- The existence and purpose of `neo4j-admin`, `neo4j-headless-service`,
+  `neo4j-persistent-volume`, `neo4j-docker-desktop-pv`, and
+  `neo4j-reverse-proxy` were confirmed by fetching each chart's
+  `Chart.yaml`/`values.yaml` directly from `neo4j/helm-charts` (not
+  guessed from the directory names) — `neo4j-admin` in particular reads
+  as a general admin chart from its name but its `values.yaml` shows it's
+  specifically a scheduled backup `CronJob`.
+- The nginx `stream {}` module recommendation and the claim that an
+  external LB/proxy works transparently with Neo4j's `neo4j://` driver
+  scheme via server-side routing were both checked against Neo4j's own
+  "Access the Neo4j cluster from outside Kubernetes" operations-manual
+  page (fetched directly — see Sources), not asserted from general nginx/
+  Bolt knowledge alone.
+- `terraform/ingress.tf`'s `helm_release.neo4j_reverse_proxy` values, and
+  the `kubectl_manifest` Gateway/VirtualService `yaml_body`s, were
+  rendered through Python's `yaml` module the same way as `neo4j.tf`'s, to
+  confirm the shape matches: the `neo4j-reverse-proxy` chart's own
+  `values.yaml` (`reverseProxy.serviceName`/`namespace`/`nodeSelector`/
+  `tolerations`/`ingress.enabled`); and Istio's own `Gateway`/
+  `VirtualService` API shape (`spec.selector`/`spec.servers[].port,tls,hosts`
+  for Gateway, `spec.hosts`/`spec.gateways`/`spec.http[].route[].destination.host,port`
+  for VirtualService), checked against Istio's own config reference docs
+  (see Sources), not guessed.
+- The `<neo4j.name>-lb-neo4j` Service name used for `reverseProxy.serviceName`
+  matches the literal example in Neo4j's own "Access outside Kubernetes"
+  doc. The reverse-proxy chart's own generated Service name
+  (`<release>-reverseproxy-service`, used in the VirtualService's
+  `destination.host`) was derived from its `templates/ingress.yaml` and
+  `templates/_helpers.tpl` (fetched directly — both reference
+  `{{ include "neo4j.reverseProxy.fullname" . }}-reverseproxy-service`) —
+  **not directly confirmed**, since this sandbox's network couldn't fetch
+  the chart's `templates/service.yaml` (guessed several plausible
+  filenames, all 404); double-check the actual Service name/port after a
+  real `helm install` before assuming the `VirtualService` in
+  `ingress.tf` is exactly right.
+- That `reverseProxy.ingress.enabled: false` still leaves the chart's
+  Service (as opposed to just its Ingress) in place is inferred from the
+  template only wrapping the `Ingress` `kind` in that conditional, not
+  independently confirmed against the Service template for the same
+  reason above.
+- `gavinbunney/kubectl`'s `kubectl_manifest` (not a HashiCorp provider)
+  was used because the mainline `hashicorp/kubernetes` provider has no
+  generic resource for arbitrary CRDs like Istio's — this is the
+  established community pattern for exactly this, not an untested choice,
+  but wasn't applied against a real cluster in this sandbox (no live AKS,
+  and `helm.neo4j.com`/`istio.io`/`github.com` were all unreachable here —
+  see the chart-repo-access note above).
+- The OIDC-only auth changes were exercised directly, unlike most of this
+  README's other Terraform-side changes (this sandbox does have Python and,
+  once `apt-get install gettext-base` was run, `envsubst`, even without a
+  live cluster or `terraform`/`cypher-shell`/network access):
+  `render-and-run.sh bootstrap-pipeline-admin` was run in `--dry-run` and
+  confirmed to render `bootstrap-pipeline-admin.cypher.tpl` correctly and
+  reject a malformed Entra Object ID; a stubbed `python3` on `PATH`
+  confirmed `NEO4J_AUTH_MODE=oidc` actually dispatches `onboard` to
+  `run_cypher_oidc.py` instead of `cypher-shell`, and separately confirmed
+  `bootstrap-pipeline-admin` **ignores** `NEO4J_AUTH_MODE=oidc` and stays
+  on native (failing on missing `NEO4J_ADMIN_USER` rather than ever
+  invoking the stub) — the "always native" behavior the design depends on.
+  `run_cypher_oidc.py`'s `split_statements()` was run directly against the
+  real rendered bootstrap template and confirmed to produce the expected
+  two statements; its env-var validation was confirmed to fail clearly
+  (not silently) when Entra credentials are unset. Not exercised: an
+  actual Entra token request or a real Neo4j bearer-token connection (no
+  network/cluster here) — `bearer_auth()`'s existence and signature were
+  confirmed against Neo4j's own Python Driver Manual and blog post (see
+  Sources), not assumed.
 - Every `azurerm_kubernetes_cluster`/`azurerm_kubernetes_cluster_node_pool`/
   `azurerm_key_vault` argument used here (`azure_active_directory_role_based_access_control`,
   `network_profile`, `key_vault_secrets_provider`, `microsoft_defender`,
@@ -292,6 +631,17 @@ against a real Neo4j instance before turning dry-run off.
 - [Manage privileges — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/authentication-authorization/manage-privileges.adoc)
 - [Database administration — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/authentication-authorization/database-administration.adoc)
 - [Cypher Shell — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/cypher-shell.adoc)
+- [Configuring the Neo4j Helm chart repository — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/kubernetes/helm-charts-setup.adoc)
+- [Access the Neo4j cluster from outside Kubernetes — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/kubernetes/quickstart-cluster/access-outside-k8s.adoc)
+- [neo4j/helm-charts repo — chart index](https://raw.githubusercontent.com/neo4j/helm-charts/master/index.yaml) and [Chart.yaml/values.yaml for neo4j-reverse-proxy, neo4j-admin, neo4j-headless-service, neo4j-persistent-volume, neo4j-docker-desktop-pv](https://github.com/neo4j/helm-charts/tree/dev)
+- [AKS system node pool restrictions (`only_critical_addons_enabled`) — Terraform `azurerm_kubernetes_cluster` docs](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster)
+- [Istio Gateway configuration reference](https://istio.io/latest/docs/reference/config/networking/gateway/)
+- [Istio VirtualService configuration reference](https://istio.io/latest/docs/reference/config/networking/virtual-service/)
+- [kubectl_manifest (gavinbunney/kubectl Terraform provider docs)](https://registry.terraform.io/providers/gavinbunney/kubectl/latest/docs/resources/manifest)
+- [Single sign-on integration — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/authentication-authorization/sso-integration.adoc)
+- [Advanced connection information (bearer_auth) — Neo4j Python Driver Manual](https://neo4j.com/docs/python-manual/current/connect-advanced/)
+- [How to create and integrate an Okta OIDC service account with Neo4j — Neo4j Developer Blog](https://neo4j.com/blog/developer/how-to-create-and-integrate-an-okta-oidc-service-account-with-neo4j/)
 - [azurerm_kubernetes_cluster (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster)
 - [azurerm_kubernetes_cluster_node_pool (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster_node_pool)
 - [azurerm_key_vault (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/key_vault)
+- [kubernetes_pod_disruption_budget_v1 (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/kubernetes/latest/docs/resources/pod_disruption_budget_v1)

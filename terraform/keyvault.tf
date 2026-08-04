@@ -37,3 +37,19 @@ resource "azurerm_key_vault_secret" "neo4j_admin_password" {
 
   depends_on = [azurerm_role_assignment.kv_admin]
 }
+
+# Only created when var.neo4j_pipeline_client_secret is actually supplied
+# (that app registration/service principal is created manually in Entra,
+# same one-time-setup pattern as neo4j_oidc_client_id -- see README). The
+# Azure DevOps variable group that already links neo4j-admin-password
+# (azure-pipelines/README.md) should link this one too, exposed as
+# PIPELINE_CLIENT_SECRET, once NEO4J_AUTH_MODE=oidc is in use.
+resource "azurerm_key_vault_secret" "neo4j_pipeline_client_secret" {
+  count = var.neo4j_pipeline_client_secret != "" ? 1 : 0
+
+  name         = "neo4j-pipeline-client-secret"
+  value        = var.neo4j_pipeline_client_secret
+  key_vault_id = azurerm_key_vault.this.id
+
+  depends_on = [azurerm_role_assignment.kv_admin]
+}

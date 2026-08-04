@@ -1,0 +1,23 @@
+# Mirrors kubectl_manifest.neo4j_reverse_proxy_gateway in terraform/ingress.tf,
+# for a local host/no-TLS run (terraform's TLS branch needs a real Secret,
+# out of scope for local validation -- see README).
+#
+# selector matches Istio's own default ingress gateway label
+# (istio_ingress_gateway_selector's default in variables.tf) -- if you
+# installed Istio locally with `istioctl install --set profile=demo`, this
+# matches its gateway out of the box.
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: neo4j-aks-local-reverse-proxy-gateway
+  namespace: neo4j
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http-neo4j
+        protocol: HTTP
+      hosts:
+        - "neo4j.local.test"

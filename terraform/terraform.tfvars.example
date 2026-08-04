@@ -41,5 +41,43 @@ neo4j_node_pool_tier           = "small"
 # up if your license is scoped to a single instance.
 neo4j_cluster_size = 1
 
+# "helm_release" (default) uses Terraform's native helm provider.
+# "helm_cli" instead shells out to a local `helm` binary via null_resource
+# -- see README's proxy-cache note if helm.neo4j.com isn't reachable from
+# your network and you're pointing neo4j_helm_repo_url at an internal mirror.
+neo4j_deployment_method  = "helm_release"
+neo4j_helm_repo_url      = "https://helm.neo4j.com/neo4j"
+neo4j_helm_chart_version = "" # e.g. "2026.6.0" to pin; "" = latest
+
 # Leave "" until the one-time Entra app registration in README.md is done.
 neo4j_oidc_client_id = ""
+
+# Opt-in, and only after OIDC above is working: drops native (password)
+# auth entirely, leaving only Entra SSO. Requires the one-time bootstrap +
+# rollout sequence in README's "OIDC-only authentication" section --
+# flipping this straight to true without that first locks everyone out,
+# including this stack's own admin password, with no fallback.
+neo4j_disable_native_auth = false
+
+# Only needed once neo4j_disable_native_auth = true: the onboarding
+# pipeline's OWN Entra app registration/service principal's client secret
+# (distinct from neo4j_oidc_client_id -- see README). Leave "" to manage
+# this secret entirely outside Terraform instead.
+neo4j_pipeline_client_secret = ""
+
+# Opt-in: Neo4j's own neo4j-reverse-proxy chart + an Istio Gateway/
+# VirtualService in front of it, for end users who can only reach 80/443
+# (not Bolt's 7687 directly). Assumes Istio is already installed/managed
+# in this cluster outside this stack -- see README's reverse-proxy section
+# before enabling. Both the reverse-proxy pod and (once you've pointed
+# your Istio gateway install at it too, per the README) the ingress
+# gateway run on a dedicated "ingress" node pool (node_pools.tf), not the
+# tenant small/large pools or the tainted system pool.
+neo4j_reverse_proxy_enabled         = false
+neo4j_reverse_proxy_host            = "" # required if enabled, e.g. "neo4j.example.com"
+neo4j_reverse_proxy_tls_secret_name = "" # existing k8s TLS secret (Gateway credentialName), or "" for plain HTTP
+ingress_pool_vm_size                = "Standard_D4s_v5"
+ingress_pool_node_count             = 2
+istio_ingress_gateway_selector = {
+  istio = "ingressgateway" # match your existing Istio ingress gateway's pod labels
+}

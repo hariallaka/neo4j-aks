@@ -1,0 +1,23 @@
+# Mirrors the reverseProxy values block in terraform/ingress.tf's
+# helm_release.neo4j_reverse_proxy. serviceName matches
+# neo4j-values.yaml's neo4j.name ("neo4j-aks-local") + the chart's own
+# "-lb-neo4j" suffix, same convention as production.
+#
+# NOT run/verified in this sandbox -- see neo4j-values.yaml's header.
+
+reverseProxy:
+  serviceName: "neo4j-aks-local-lb-neo4j"
+  namespace: "neo4j"
+
+  nodeSelector:
+    workload: ingress
+  tolerations:
+    - key: "workload"
+      operator: "Equal"
+      value: "ingress"
+      effect: "NoSchedule"
+
+  # No chart-managed Ingress -- the Istio Gateway/VirtualService in
+  # manifests/ do the routing instead, same as production.
+  ingress:
+    enabled: false
