@@ -65,19 +65,12 @@ neo4j_disable_native_auth = false
 # this secret entirely outside Terraform instead.
 neo4j_pipeline_client_secret = ""
 
-# Opt-in: Neo4j's own neo4j-reverse-proxy chart + an Istio Gateway/
-# VirtualService in front of it, for end users who can only reach 80/443
-# (not Bolt's 7687 directly). Assumes Istio is already installed/managed
-# in this cluster outside this stack -- see README's reverse-proxy section
-# before enabling. Both the reverse-proxy pod and (once you've pointed
-# your Istio gateway install at it too, per the README) the ingress
-# gateway run on a dedicated "ingress" node pool (node_pools.tf), not the
-# tenant small/large pools or the tainted system pool.
-neo4j_reverse_proxy_enabled         = false
-neo4j_reverse_proxy_host            = "" # required if enabled, e.g. "neo4j.example.com"
-neo4j_reverse_proxy_tls_secret_name = "" # existing k8s TLS secret (Gateway credentialName), or "" for plain HTTP
-ingress_pool_vm_size                = "Standard_D4s_v5"
-ingress_pool_node_count             = 2
+# Opt-in: front Neo4j with the cluster's existing Istio ingress gateway --
+# a Gateway + VirtualService doing plain TCP passthrough to services.neo4j
+# (Bolt 7687 + Browser HTTP 7474). Assumes Istio is already installed/
+# managed in this cluster outside this stack -- see README's Istio section
+# before enabling.
+neo4j_istio_gateway_enabled = false
 istio_ingress_gateway_selector = {
   istio = "ingressgateway" # match your existing Istio ingress gateway's pod labels
 }

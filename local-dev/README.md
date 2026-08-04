@@ -2,9 +2,10 @@
 
 Validates the **Kubernetes/Helm/Istio layer** of `terraform/neo4j.tf` and
 `terraform/ingress.tf` against a local [kind](https://kind.sigs.k8s.io/)
-cluster: same node taints/labels (`workloadsize=small|large`,
-`workload=ingress`), the same charts with equivalent values, and the same
-Istio `Gateway`/`VirtualService` shape.
+cluster: same node taints/labels (`workloadsize=small|large`), the same
+`neo4j` chart with equivalent values, and the same Istio TCP `Gateway`/
+`VirtualService` shape (plain passthrough to `services.neo4j` -- no
+separate backend pod).
 
 ## What this does and doesn't prove
 
@@ -24,8 +25,8 @@ since it had no network path to `registry.terraform.io`.
 What this harness **does** validate: that the chart values Terraform
 computes are structurally correct and the chart actually accepts them
 (clustering forms, pods schedule where the taints/selectors say they
-should, the `neo4j-reverse-proxy` chart's Service comes up, Istio accepts
-the `Gateway`/`VirtualService` shape). The values files here are
+should, Istio accepts the `Gateway`/`VirtualService` shape and routes to
+`services.neo4j`). The values files here are
 **hand-mirrored** from `terraform/*.tf`, not generated from it — see each
 file's header comment for the specific deviations (smaller resource
 requests, `ClusterIP` instead of `LoadBalancer`, `eval` license instead of
@@ -68,8 +69,7 @@ where you're running this:
 NEO4J_HELM_REPO_URL=https://your-internal-mirror/neo4j ./validate.sh up
 ```
 
-Skip the `neo4j-reverse-proxy`/Istio half (just validate the `neo4j`
-cluster chart layer):
+Skip the Istio half (just validate the `neo4j` cluster chart layer):
 
 ```bash
 SKIP_ISTIO=1 ./validate.sh up
@@ -81,19 +81,11 @@ SKIP_ISTIO=1 ./validate.sh up
   is a guess at the chart's StatefulSet/pod naming — if it's wrong, the
   script warns rather than fails; check `kubectl -n neo4j get pods` and
   adjust `validate.sh` if needed.
-- `terraform/ingress.tf`'s `kubernetes_pod_disruption_budget_v1` isn't
-  reproduced here (it's a plain Kubernetes resource, not part of either
-  chart) — `validate.sh` only prints whatever PDBs the charts themselves
-  create, which may be none; create one by hand with `kubectl apply` if
+- `terraform/neo4j.tf`'s `kubernetes_pod_disruption_budget_v1` isn't
+  reproduced here (it's a plain Kubernetes resource, not part of the
+  chart) — `validate.sh` only prints whatever PDBs the chart itself
+  creates, which may be none; create one by hand with `kubectl apply` if
   you want to validate that shape too.
-- The `neo4j-reverse-proxy` chart's actual Service name
-  (`<release>-reverseproxy-service`, used in `manifests/virtualservice.yaml`)
-  was derived from the chart's `templates/ingress.yaml`/`_helpers.tpl`,
-  not independently confirmed against its `templates/service.yaml` — the
-  sandbox that wrote this couldn't fetch that file (network-blocked, see
-  the main README's Testing section). Confirm the actual Service name
-  with `kubectl -n neo4j get svc` after `helm install` and fix
-  `manifests/virtualservice.yaml` if it's off.
 - `istioctl install --set profile=demo` installs a full demo-profile Istio
   (ingress gateway, egress gateway, etc.) — heavier than the "minimal"
   profile terraform/ingress.tf's production assumption (Istio already

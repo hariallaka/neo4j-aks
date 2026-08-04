@@ -1,7 +1,7 @@
 # kind cluster mirroring this stack's node-pool taints/labels, so the same
 # nodeSelector/toleration values used in terraform/*.tf (workloadsize=small|
-# large, workload=ingress) actually mean something locally instead of every
-# pod just landing wherever.
+# large) actually mean something locally instead of every pod just landing
+# wherever.
 #
 # What this does NOT emulate, because there is no local emulator for it:
 # AKS's control plane, Azure CNI, Azure LoadBalancer (kind's own
@@ -31,11 +31,3 @@ nodes:
           kubeletExtraArgs:
             node-labels: "workloadsize=large"
             register-with-taints: "workloadsize=large:NoSchedule"
-  - role: worker
-    kubeadmConfigPatches:
-      - |
-        kind: JoinConfiguration
-        nodeRegistration:
-          kubeletExtraArgs:
-            node-labels: "workload=ingress"
-            register-with-taints: "workload=ingress:NoSchedule"
