@@ -196,6 +196,29 @@ variable "neo4j_node_pool_tier" {
   }
 }
 
+variable "neo4j_deployment_method" {
+  type        = string
+  description = "How to install the Neo4j Helm release(s). \"helm_release\" (default) uses Terraform's native helm_release resource. \"helm_cli\" instead shells out to a locally-installed `helm` binary via null_resource/local-exec -- useful when the machine running `terraform apply` reaches the chart repo (or an internal mirror) only through a locally-configured proxy/helm setup that the Terraform helm provider can't be pointed at the same way. Only one method's resources are created per apply; see the README's HA section for how to switch between them on an existing deployment."
+  default     = "helm_release"
+
+  validation {
+    condition     = contains(["helm_release", "helm_cli"], var.neo4j_deployment_method)
+    error_message = "neo4j_deployment_method must be \"helm_release\" or \"helm_cli\"."
+  }
+}
+
+variable "neo4j_helm_repo_url" {
+  type        = string
+  description = "Helm chart repository URL for the neo4j chart (what `helm repo add`/the Terraform helm provider's `repository` argument points at). Defaults to Neo4j's own repo (helm.neo4j.com/neo4j); point this at an internal proxy/mirror (Artifactory, Nexus, Harbor, etc.) if that's not directly reachable from your network -- see the README's proxy-cache note for exactly what such a mirror needs to serve."
+  default     = "https://helm.neo4j.com/neo4j"
+}
+
+variable "neo4j_helm_chart_version" {
+  type        = string
+  description = "Pin the neo4j chart version (e.g. \"2026.6.0\"). Leave empty to install whatever version the configured repo currently resolves as latest."
+  default     = ""
+}
+
 variable "neo4j_oidc_client_id" {
   type        = string
   description = "Application (client) ID of the Entra app registration used for Neo4j SSO/OIDC (see README's one-time Entra setup section). Leave empty to run with native auth only -- OIDC config is omitted entirely until this is set."

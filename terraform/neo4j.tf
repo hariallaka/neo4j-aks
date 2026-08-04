@@ -132,16 +132,20 @@ locals {
   }
 }
 
-# Official Neo4j chart (neo4j/helm-charts, repo https://helm.neo4j.com/neo4j,
-# chart name "neo4j" -- confirmed against the chart's own values.yaml, not
-# the older/deprecated neo4j-contrib/neo4j-helm chart).
+# Official Neo4j chart (neo4j/helm-charts, repo https://helm.neo4j.com/neo4j
+# by default -- chart name "neo4j" -- confirmed against the chart's own
+# values.yaml, not the older/deprecated neo4j-contrib/neo4j-helm chart).
+# Only created when var.neo4j_deployment_method = "helm_release" (the
+# default); see neo4j-helm-cli.tf for the null_resource/helm-CLI
+# alternative.
 resource "helm_release" "neo4j" {
-  for_each = local.neo4j_release_names
+  for_each = var.neo4j_deployment_method == "helm_release" ? local.neo4j_release_names : {}
 
   name       = each.value
   namespace  = kubernetes_namespace.neo4j.metadata[0].name
-  repository = "https://helm.neo4j.com/neo4j"
+  repository = var.neo4j_helm_repo_url
   chart      = "neo4j"
+  version    = var.neo4j_helm_chart_version != "" ? var.neo4j_helm_chart_version : null
 
   values = [yamlencode(local.neo4j_helm_values)]
 

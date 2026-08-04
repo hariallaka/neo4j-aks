@@ -110,6 +110,149 @@ that isn't purely a technical trial; the `check` blocks in `neo4j.tf`
 only validate the *edition*/*license-flag* combination is internally
 consistent, not that your specific license covers clustering.
 
+### Deployment method: `helm_release` vs `helm_cli`
+
+`var.neo4j_deployment_method` picks how the chart actually gets installed:
+
+- **`"helm_release"`** (default) — Terraform's native `helm_release`
+  resource (`helm_release.neo4j` in `neo4j.tf`), talking to the chart repo
+  via the Terraform helm provider's own Go SDK.
+- **`"helm_cli"`** — `neo4j-helm-cli.tf` instead renders the same values to
+  a local file per member (`local_file.neo4j_values`) and shells out to
+  whatever `helm` binary is on the machine running `terraform apply`
+  (`null_resource.neo4j_helm_cli`, via a `local-exec` provisioner running
+  `helm upgrade --install`). Use this if that machine's `helm` is already
+  set up to reach the chart repo (proxy env vars, an internal mirror
+  trusted by its CA bundle, etc.) in a way the Terraform helm provider
+  can't easily be pointed at the same way. Requires `helm` and a working
+  `kubectl`/kubeconfig context on that machine; `terraform plan` can't show
+  chart-internal diffs for this path the way it can for `helm_release` —
+  Terraform only sees an opaque `null_resource` that re-runs whenever the
+  rendered values' hash (`values_sha256` trigger) changes.
+- Only one method's resources exist per apply (the other's `for_each` is
+  empty). **Switching methods on an already-deployed cluster doesn't
+  migrate anything** — the newly-inactive method's resources drop out of
+  Terraform's state, but the underlying Helm release stays installed in
+  Kubernetes until you `helm uninstall` it by hand (or `terraform destroy`
+  before switching).
+
+### Chart repository access behind a proxy (exact URLs)
+
+`var.neo4j_helm_repo_url` (default `https://helm.neo4j.com/neo4j`) is what
+`helm repo add`/the Terraform helm provider's `repository` argument
+resolves against — point it at an internal proxy/mirror if
+`helm.neo4j.com` itself isn't reachable from your network. What that URL
+actually needs to serve, concretely:
+
+- **`<repo_url>/index.yaml`** — the chart repo index. For `neo4j`, this is
+  a standard Helm `apiVersion: v1` index; the current entries' `urls:`
+  fields point to `.tgz` chart packages.
+- **The chart packages themselves are *not* hosted under `helm.neo4j.com`**
+  — the index's `urls:` entries point straight at GitHub Releases, e.g.
+  `https://github.com/neo4j/helm-charts/releases/download/2026.6.0/neo4j-2026.6.0.tgz`.
+  So `helm.neo4j.com` is effectively just the index; the actual `.tgz`
+  download always goes to `github.com`/`objects.githubusercontent.com`
+  regardless of what `neo4j_helm_repo_url` points at, unless your mirror
+  also rewrites those `urls:` entries to itself (which is exactly what an
+  Artifactory/Nexus/Harbor "generic remote" Helm repo type does — it
+  proxies the index *and* re-writes/caches the package URLs so clients
+  never touch `github.com` directly).
+- The same `index.yaml` content is also mirrored as a plain file in the
+  `neo4j/helm-charts` GitHub repo itself, on its **`master`** branch (not
+  `dev`, and there's no `gh-pages` branch): fetchable at
+  `https://raw.githubusercontent.com/neo4j/helm-charts/master/index.yaml`.
+  If your network already allows `raw.githubusercontent.com` but not
+  `helm.neo4j.com`, this is a way to inspect available chart
+  versions/URLs without needing `helm.neo4j.com` at all — but it doesn't
+  by itself solve chart *downloads*, since the `urls:` inside it still
+  point at `github.com/neo4j/helm-charts/releases/download/...`.
+- Practical options for a proxy cache, in order of how much they insulate
+  you from `helm.neo4j.com`/`github.com` outages or access issues:
+  1. An internal Helm "generic remote" repo (Artifactory/Nexus/Harbor)
+     configured to proxy `https://helm.neo4j.com/neo4j` — handles both the
+     index and the package rewrite/caching automatically; point
+     `neo4j_helm_repo_url` at your internal repo's URL.
+  2. If only `github.com`/`raw.githubusercontent.com` are reachable (not
+     `helm.neo4j.com`), download the specific chart `.tgz` you need
+     directly from `github.com/neo4j/helm-charts/releases`, push it into
+     an internal generic/OCI registry yourselves, and point
+     `neo4j_helm_repo_url`/the chart source at that instead.
+  3. `helm pull` the `.tgz` once (from wherever it *is* reachable) and use
+     a local chart path — the Terraform helm provider's `chart` argument
+     also accepts a filesystem path, not just a repo+chart name, if you'd
+     rather vendor the chart into this repo than depend on any remote repo
+     at apply time.
+
+### Other Neo4j Helm charts in this monorepo
+
+`neo4j/helm-charts` (same repo the `neo4j` chart comes from) ships several
+other charts alongside it, all versioned/released together. None of these
+are wired into this Terraform stack today — this is what they're for, if
+you want to add them:
+
+| Chart | What it does | Relevant here? |
+|---|---|---|
+| `neo4j` | The DBMS itself — what `neo4j.tf` deploys. | Already used. |
+| `neo4j-admin` | A scheduled backup `CronJob` (despite the name, it's backups, not a general admin console) — runs `neo4j-admin database backup` against a running instance/cluster on a cron schedule, to cloud storage or a PVC. | Worth adding if you need automated backups; not currently in this stack. |
+| `neo4j-headless-service` | An additional headless (`clusterIP: None`) Service selecting all members sharing a `neo4j.name`, for stable per-pod internal DNS names instead of (or alongside) the chart's own default/LoadBalancer Services. | Optional; `neo4j.tf`'s per-member Services already provide internal addressing. Its own docs note it's a valid backend target for `neo4j-reverse-proxy` below. |
+| `neo4j-persistent-volume` / `neo4j-docker-desktop-pv` | Pre-provision disks/PVs for the `neo4j` chart to bind to, for storage setups where dynamic provisioning (what `neo4j.tf` uses via `managed-csi`) isn't the right fit, or for local Docker Desktop Kubernetes. | Not needed here — AKS's `managed-csi` dynamic provisioning already covers this. |
+| `neo4j-reverse-proxy` | Deploys a small reverse-proxy pod that fronts both HTTP (Browser) and Bolt traffic behind a single port via WebSocket tunneling, wired through an `ingress-nginx` or `haproxy-ingress` Kubernetes Ingress. Built for networks where only 80/443 egress is allowed. | See the next section — relevant to what you're asking about VM-based nginx below, but this chart's approach is in-cluster (via `ingress-nginx`), not a standalone VM. |
+
+### Fronting Neo4j with an external reverse proxy (e.g. a VM running nginx)
+
+Short answer: **yes, this works**, with one important distinction —
+whether your users can reach a raw TCP port (7687) or only 80/443.
+
+**If port 7687 (Bolt) can reach the proxy VM:** a plain Layer‑4 TCP proxy
+works. Bolt is a binary protocol, not HTTP, so it needs nginx's `stream {}`
+module (`ngx_stream_module` — built into `nginx.org`'s official packages
+and most distro `nginx-full`/`nginx-extras` packages since nginx 1.9.2;
+confirm your specific build has it, e.g. `nginx -V 2>&1 | grep stream`).
+A minimal config:
+
+```nginx
+stream {
+    upstream neo4j_bolt {
+        server <internal-lb-or-service-ip>:7687;
+    }
+    server {
+        listen 7687;
+        proxy_pass neo4j_bolt;
+    }
+}
+```
+
+This is architecturally the same role AKS's own `services.neo4j`
+LoadBalancer already plays (see **High availability (clustering)** above)
+— Neo4j's own Kubernetes docs confirm connecting through such a proxy/LB
+works transparently for the `neo4j://` driver scheme via **server-side
+routing**: the driver connects once to whatever the proxy forwards it to,
+and Neo4j internally forwards reads/writes to the correct cluster member
+without the client needing direct connectivity to each member's real
+(internal-only) address. Practically, for a VM-based proxy in front of
+AKS instead of (or in addition to) the chart's own LoadBalancer Service:
+point `services.neo4j.spec.type` at an *internal* Azure LoadBalancer
+(`service.beta.kubernetes.io/azure-load-balancer-internal: "true"` in
+`services.neo4j.annotations`, on a subnet your nginx VM can reach) or a
+NodePort, and have nginx's `upstream` target that internal IP. End users
+then just connect to `neo4j://<nginx-vm-address>:7687` as if it were the
+database directly — nothing Bolt-driver-specific to configure on their
+end. Points worth planning for: TLS (decide whether nginx terminates
+`neo4j+s://`/`bolt+s://` or passes it through via `ssl_preread`), the
+proxy VM itself becoming a new single point of failure (put 2+ behind
+their own Azure LB, or `keepalived`), and open-source nginx only doing
+passive (not active) health checks against upstreams.
+
+**If only 80/443 egress is allowed** (no custom TCP port reachable at
+all), plain TCP passthrough on 7687 doesn't help — you need Bolt tunneled
+inside HTTP/WebSocket on 443, which is exactly what the `neo4j-reverse-proxy`
+chart above does. That chart runs its own multiplexing logic in front of
+`ingress-nginx` (itself nginx-based) rather than a generic `stream {}`
+proxy; replicating it on a standalone VM would mean running that same
+image (or equivalent WebSocket-upgrade-aware proxying) on the VM instead
+of plain TCP passthrough — a materially different, more involved setup
+than the 7687 case above.
+
 ### Multi-tenant identity model
 
 Rather than mapping Entra groups/app-roles directly to Neo4j roles, each
@@ -250,6 +393,32 @@ policy). Given that, what was actually done:
   are strings in the `hashicorp/kubernetes` provider (checked against the
   provider docs) — `neo4j.tf` wraps the computed value in `tostring()`
   accordingly.
+- `neo4j-helm-cli.tf`'s rendered `helm upgrade --install ...` command was
+  built and printed with real sample values in Python to confirm the flag
+  ordering/quoting is sane; the `local-exec`/`null_resource` mechanics
+  themselves weren't run end-to-end (no `helm`/cluster in this sandbox).
+- The chart repo's actual URL structure (`<repo>/index.yaml`, and that its
+  `urls:` entries point at `github.com/neo4j/helm-charts/releases/download/...`
+  rather than staying under `helm.neo4j.com`) was confirmed by fetching the
+  same index content mirrored at
+  `raw.githubusercontent.com/neo4j/helm-charts/master/index.yaml` — direct
+  requests to `helm.neo4j.com` and `github.com` itself were both blocked
+  in this sandbox's network policy, consistent with what was reported
+  about the target enterprise network, so this was checked via the one
+  path (`raw.githubusercontent.com`) that was reachable, not guessed.
+- The existence and purpose of `neo4j-admin`, `neo4j-headless-service`,
+  `neo4j-persistent-volume`, `neo4j-docker-desktop-pv`, and
+  `neo4j-reverse-proxy` were confirmed by fetching each chart's
+  `Chart.yaml`/`values.yaml` directly from `neo4j/helm-charts` (not
+  guessed from the directory names) — `neo4j-admin` in particular reads
+  as a general admin chart from its name but its `values.yaml` shows it's
+  specifically a scheduled backup `CronJob`.
+- The nginx `stream {}` module recommendation and the claim that an
+  external LB/proxy works transparently with Neo4j's `neo4j://` driver
+  scheme via server-side routing were both checked against Neo4j's own
+  "Access the Neo4j cluster from outside Kubernetes" operations-manual
+  page (fetched directly — see Sources), not asserted from general nginx/
+  Bolt knowledge alone.
 - Every `azurerm_kubernetes_cluster`/`azurerm_kubernetes_cluster_node_pool`/
   `azurerm_key_vault` argument used here (`azure_active_directory_role_based_access_control`,
   `network_profile`, `key_vault_secrets_provider`, `microsoft_defender`,
@@ -292,6 +461,10 @@ against a real Neo4j instance before turning dry-run off.
 - [Manage privileges — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/authentication-authorization/manage-privileges.adoc)
 - [Database administration — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/authentication-authorization/database-administration.adoc)
 - [Cypher Shell — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/cypher-shell.adoc)
+- [Configuring the Neo4j Helm chart repository — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/kubernetes/helm-charts-setup.adoc)
+- [Access the Neo4j cluster from outside Kubernetes — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/kubernetes/quickstart-cluster/access-outside-k8s.adoc)
+- [neo4j/helm-charts repo — chart index](https://raw.githubusercontent.com/neo4j/helm-charts/master/index.yaml) and [Chart.yaml/values.yaml for neo4j-reverse-proxy, neo4j-admin, neo4j-headless-service, neo4j-persistent-volume, neo4j-docker-desktop-pv](https://github.com/neo4j/helm-charts/tree/dev)
 - [azurerm_kubernetes_cluster (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster)
 - [azurerm_kubernetes_cluster_node_pool (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster_node_pool)
 - [azurerm_key_vault (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/key_vault)
+- [kubernetes_pod_disruption_budget_v1 (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/kubernetes/latest/docs/resources/pod_disruption_budget_v1)

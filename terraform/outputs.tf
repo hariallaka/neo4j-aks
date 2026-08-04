@@ -34,8 +34,13 @@ output "neo4j_cluster_size" {
 }
 
 output "neo4j_release_names" {
-  description = "Helm release name for each Neo4j cluster member. All members share neo4j.name (var.neo4j_release_name) and are selectable together via the label helm.neo4j.com/neo4j.name=<neo4j_release_name>."
-  value       = [for r in helm_release.neo4j : r.name]
+  description = "Helm release name for each Neo4j cluster member, regardless of neo4j_deployment_method. All members share neo4j.name (var.neo4j_release_name) and are selectable together via the label helm.neo4j.com/neo4j.name=<neo4j_release_name>."
+  value       = values(local.neo4j_release_names)
+}
+
+output "neo4j_deployment_method" {
+  description = "Which mechanism deployed the Neo4j release(s): \"helm_release\" (Terraform's native resource) or \"helm_cli\" (null_resource + local helm CLI)."
+  value       = var.neo4j_deployment_method
 }
 
 output "neo4j_initial_password" {

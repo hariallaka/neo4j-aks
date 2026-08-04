@@ -41,5 +41,13 @@ neo4j_node_pool_tier           = "small"
 # up if your license is scoped to a single instance.
 neo4j_cluster_size = 1
 
+# "helm_release" (default) uses Terraform's native helm provider.
+# "helm_cli" instead shells out to a local `helm` binary via null_resource
+# -- see README's proxy-cache note if helm.neo4j.com isn't reachable from
+# your network and you're pointing neo4j_helm_repo_url at an internal mirror.
+neo4j_deployment_method  = "helm_release"
+neo4j_helm_repo_url      = "https://helm.neo4j.com/neo4j"
+neo4j_helm_chart_version = "" # e.g. "2026.6.0" to pin; "" = latest
+
 # Leave "" until the one-time Entra app registration in README.md is done.
 neo4j_oidc_client_id = ""
