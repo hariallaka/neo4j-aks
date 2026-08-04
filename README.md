@@ -13,6 +13,7 @@ terraform/            AKS cluster, node pools, Key Vault, Neo4j Helm release.
 onboarding/            Cypher templates + shell runner to onboard/offboard a tenant or identity.
 azure-pipelines/       Azure DevOps pipeline YAML that runs the onboarding scripts on demand.
 local-dev/             kind-based local harness for validating the Kubernetes/Helm/Istio layer without a real AKS cluster.
+examples/              Standalone, minimal examples -- see examples/existing-aks-istio for deploying Neo4j onto an AKS cluster you already have, with Istio already installed.
 ```
 
 ## Architecture

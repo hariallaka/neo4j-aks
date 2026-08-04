@@ -1,0 +1,35 @@
+# Copy to terraform.tfvars and adjust, or pass equivalent -var/-var-file/
+# TF_VAR_* at apply time.
+
+# Usually fine as-is if `kubectl config current-context` already points at
+# your AKS cluster (e.g. after `az aks get-credentials --name ... --resource-group ...`).
+kube_config_path = "~/.kube/config"
+kube_context     = ""
+
+neo4j_namespace                = "neo4j"
+neo4j_release_name             = "neo4j"
+neo4j_edition                  = "enterprise"
+neo4j_accept_license_agreement = "eval" # or "yes" if you hold a real license -- see https://neo4j.com/licensing/
+neo4j_cpu                      = "1000m"
+neo4j_memory                   = "2Gi"
+neo4j_storage_class            = "managed-csi"
+neo4j_data_disk_size_gb        = 50
+
+# 1 = standalone. 3+ enables clustering (needs enterprise + a license).
+neo4j_cluster_size = 3
+
+# If your cluster has dedicated/tainted node pools for this workload
+# (see the main terraform/ stack's small/large pools), set both to match;
+# otherwise leave empty to schedule on any node.
+neo4j_node_selector = {}
+neo4j_tolerations   = []
+
+neo4j_helm_repo_url      = "https://helm.neo4j.com/neo4j"
+neo4j_helm_chart_version = "" # e.g. "2026.6.0" to pin; "" = latest
+
+# Requires Istio already installed in your cluster (istiod + an ingress
+# gateway) -- this only creates the routing objects, not Istio itself.
+istio_gateway_enabled = true
+istio_ingress_gateway_selector = {
+  istio = "ingressgateway" # match your existing Istio ingress gateway's pod labels
+}
