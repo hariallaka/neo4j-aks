@@ -154,11 +154,10 @@ actually needs to serve, concretely:
   `https://github.com/neo4j/helm-charts/releases/download/2026.6.0/neo4j-2026.6.0.tgz`.
   So `helm.neo4j.com` is effectively just the index; the actual `.tgz`
   download always goes to `github.com`/`objects.githubusercontent.com`
-  regardless of what `neo4j_helm_repo_url` points at, unless your mirror
-  also rewrites those `urls:` entries to itself (which is exactly what an
-  Artifactory/Nexus/Harbor "generic remote" Helm repo type does — it
-  proxies the index *and* re-writes/caches the package URLs so clients
-  never touch `github.com` directly).
+  regardless of what `neo4j_helm_repo_url` points at, unless your proxy
+  also rewrites those `urls:` entries to itself — **not every tool that
+  calls itself a "proxy cache" actually does this for a classic
+  (non-OCI) Helm repo like this one; see below.**
 - The same `index.yaml` content is also mirrored as a plain file in the
   `neo4j/helm-charts` GitHub repo itself, on its **`master`** branch (not
   `dev`, and there's no `gh-pages` branch): fetchable at
@@ -168,22 +167,52 @@ actually needs to serve, concretely:
   versions/URLs without needing `helm.neo4j.com` at all — but it doesn't
   by itself solve chart *downloads*, since the `urls:` inside it still
   point at `github.com/neo4j/helm-charts/releases/download/...`.
-- Practical options for a proxy cache, in order of how much they insulate
-  you from `helm.neo4j.com`/`github.com` outages or access issues:
-  1. An internal Helm "generic remote" repo (Artifactory/Nexus/Harbor)
-     configured to proxy `https://helm.neo4j.com/neo4j` — handles both the
-     index and the package rewrite/caching automatically; point
-     `neo4j_helm_repo_url` at your internal repo's URL.
-  2. If only `github.com`/`raw.githubusercontent.com` are reachable (not
-     `helm.neo4j.com`), download the specific chart `.tgz` you need
-     directly from `github.com/neo4j/helm-charts/releases`, push it into
-     an internal generic/OCI registry yourselves, and point
-     `neo4j_helm_repo_url`/the chart source at that instead.
-  3. `helm pull` the `.tgz` once (from wherever it *is* reachable) and use
-     a local chart path — the Terraform helm provider's `chart` argument
-     also accepts a filesystem path, not just a repo+chart name, if you'd
-     rather vendor the chart into this repo than depend on any remote repo
-     at apply time.
+
+**Practical options for a proxy cache, in order of preference:**
+
+1. **Nexus Repository 3's native `helm (proxy)` format (recommended)** —
+   Repositories -> Create repository -> recipe `helm (proxy)` -> Remote
+   storage URL = `https://helm.neo4j.com/neo4j` (the same URL used with
+   `helm repo add`). This is a first-party Helm proxy format built for
+   exactly this kind of classic, non-OCI repo — it caches the index *and*
+   rewrites the chart `urls:` inside it to route through Nexus, so
+   `.tgz` downloads are actually proxied too, not just the index. Point
+   `neo4j_helm_repo_url` at `https://<nexus-host>/repository/<repo-name>/`.
+   **Caveat, specific to this repo's shape:** that URL-rewriting logic has
+   documented bugs (in Nexus's own `nexus-repository-helm` issue tracker)
+   around charts whose `urls:` point to a **different host than the
+   index** — which is exactly Neo4j's case (index on `helm.neo4j.com`,
+   packages on `github.com`). Confirm with a real `helm repo add` +
+   `helm pull neo4j --version <x>` against your instance (and check chart
+   downloads actually route through Nexus, not a redirect to
+   `github.com`) before relying on it; a reasonably recent Nexus3 is also
+   needed (this format landed around 3.62-3.64).
+2. **Harbor — does NOT work as a transparent proxy cache for this repo.**
+   Harbor's Proxy Cache project type only supports OCI/Docker-Registry-API
+   sources (Docker Hub, ACR, ECR, GCR/GAR, GHCR, JFrog, etc.) — a classic
+   `index.yaml`-based repo like `helm.neo4j.com/neo4j` isn't one of its
+   supported provider types. If Harbor is your standard tool, the
+   practical path is a **manual mirror**, not a live proxy: `helm pull`
+   the chart, then `helm push` it into a Harbor project as an OCI
+   artifact (`helm push neo4j-<version>.tgz oci://harbor.example.com/neo4j-mirror`),
+   re-run on each version bump. Point `neo4j_helm_repo_url` at
+   `oci://harbor.example.com/neo4j-mirror` and expect to pin
+   `neo4j_helm_chart_version` — OCI repos don't resolve "latest" the way
+   a classic index does.
+3. **Artifactory's generic Helm remote repository type** is documented to
+   do the same index-plus-package proxying as Nexus's `helm (proxy)`
+   format — a reasonable alternative if that's already your standard
+   tool, though its behavior against this specific repo's cross-host
+   `urls:` shape wasn't independently checked here the way Nexus's was.
+4. If only `github.com`/`raw.githubusercontent.com` are reachable (not
+   `helm.neo4j.com`), download the specific chart `.tgz` you need
+   directly from `github.com/neo4j/helm-charts/releases` and push it into
+   an internal registry yourselves (same manual-mirror pattern as the
+   Harbor option), or:
+5. `helm pull` the `.tgz` once and use a local chart path — the Terraform
+   helm provider's `chart` argument also accepts a filesystem path, not
+   just a repo+chart name, if you'd rather vendor the chart into this
+   repo than depend on any remote repo at apply time.
 
 ### Other Neo4j Helm charts in this monorepo
 
@@ -501,6 +530,19 @@ Docker daemon here).
   but wasn't applied against a real cluster in this sandbox (no live AKS,
   and `helm.neo4j.com`/`istio.io`/`github.com` were all unreachable here —
   see the chart-repo-access note above).
+- The proxy-cache guidance (Nexus's native `helm (proxy)` format actually
+  rewriting chart URLs vs. Harbor's Proxy Cache not supporting classic
+  Helm repos at all) is based on Sonatype's and Harbor's own documentation
+  and, for the specific claim about cross-host `urls:` rewriting bugs, the
+  `nexus-repository-helm` project's own public issue tracker — reached via
+  `WebSearch` result snippets, since `help.sonatype.com` and
+  `goharbor.io` both returned 403 to direct fetches in this sandbox (same
+  network restriction as everything else external here). Treat the
+  specific UI steps (menu names, exact recipe label) as reconstructed from
+  those snippets, not screenshot-verified — the architectural claim
+  (Harbor Proxy Cache = OCI-only; Nexus Helm proxy = classic-repo-aware
+  with known cross-host rewrite bugs) is the load-bearing part and is
+  corroborated by multiple independent sources, not a single snippet.
 - The OIDC-only auth changes were exercised directly, unlike most of this
   README's other Terraform-side changes (this sandbox does have Python and,
   once `apt-get install gettext-base` was run, `envsubst`, even without a
@@ -566,6 +608,9 @@ against a real Neo4j instance before turning dry-run off.
 - [Configuring the Neo4j Helm chart repository — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/kubernetes/helm-charts-setup.adoc)
 - [Access the Neo4j cluster from outside Kubernetes — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/kubernetes/quickstart-cluster/access-outside-k8s.adoc)
 - [neo4j/helm-charts repo — chart index](https://raw.githubusercontent.com/neo4j/helm-charts/master/index.yaml) and [Chart.yaml/values.yaml for neo4j-reverse-proxy, neo4j-admin, neo4j-headless-service, neo4j-persistent-volume, neo4j-docker-desktop-pv](https://github.com/neo4j/helm-charts/tree/dev)
+- [Create a Helm Repository — Sonatype Nexus Repository docs](https://help.sonatype.com/en/create-a-helm-repository.html)
+- [nexus-repository-helm issue tracker (index.yaml URL rewriting bugs)](https://github.com/sonatype-nexus-community/nexus-repository-helm/issues)
+- [Harbor proxy cache supported registry providers — Harbor docs](https://goharbor.io/docs/2.1.0/administration/configure-proxy-cache/)
 - [AKS system node pool restrictions (`only_critical_addons_enabled`) — Terraform `azurerm_kubernetes_cluster` docs](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster)
 - [Istio Gateway configuration reference](https://istio.io/latest/docs/reference/config/networking/gateway/)
 - [Istio VirtualService configuration reference](https://istio.io/latest/docs/reference/config/networking/virtual-service/)
