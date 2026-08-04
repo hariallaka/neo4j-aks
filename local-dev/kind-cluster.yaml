@@ -1,0 +1,41 @@
+# kind cluster mirroring this stack's node-pool taints/labels, so the same
+# nodeSelector/toleration values used in terraform/*.tf (workloadsize=small|
+# large, workload=ingress) actually mean something locally instead of every
+# pod just landing wherever.
+#
+# What this does NOT emulate, because there is no local emulator for it:
+# AKS's control plane, Azure CNI, Azure LoadBalancer (kind's own
+# cloud-provider-kind or a port-forward stands in for that -- see
+# validate.sh), Azure AD RBAC, Key Vault, or real VM-backed node pools.
+# This validates the Kubernetes/Helm/Istio *layer* of terraform/*.tf's
+# config (chart values, taints/tolerations, PodDisruptionBudget, Gateway/
+# VirtualService shape) -- not the Azure resources themselves.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: neo4j-aks-local
+nodes:
+  - role: control-plane
+  - role: worker
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "workloadsize=small"
+            register-with-taints: "workloadsize=small:NoSchedule"
+  - role: worker
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "workloadsize=large"
+            register-with-taints: "workloadsize=large:NoSchedule"
+  - role: worker
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "workload=ingress"
+            register-with-taints: "workload=ingress:NoSchedule"

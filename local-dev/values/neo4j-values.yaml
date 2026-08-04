@@ -1,0 +1,61 @@
+# Mirrors local.neo4j_helm_values in terraform/neo4j.tf, for the default
+# terraform.tfvars.example settings (neo4j_cluster_size = 3,
+# neo4j_node_pool_tier = "small"), with three deliberate local-only
+# deviations called out below. Used identically for all three members
+# (see validate.sh) -- Terraform's `for_each` only varies the Helm
+# *release* name per member, not these values, and this mirrors that.
+#
+# NOT run/verified in this sandbox (no docker/kind/helm/network here) --
+# review against whatever chart version `helm search repo neo4j/` actually
+# resolves before trusting this blindly.
+
+neo4j:
+  name: "neo4j-aks-local" # matches neo4j.name tying members into one cluster
+  edition: "enterprise"
+  # "eval" instead of terraform.tfvars.example's "yes" -- this is a local
+  # validation run, not a licensed deployment; no license key needed.
+  acceptLicenseAgreement: "eval"
+  minimumClusterSize: 3
+  resources:
+    # Chart minimums (terraform.tfvars.example uses 1000m/2Gi in
+    # production) -- three members at production sizing is a lot to ask
+    # of a laptop's Docker Desktop/Colima VM.
+    cpu: "500m"
+    memory: "2Gi"
+
+volumes:
+  data:
+    mode: "dynamic"
+    dynamic:
+      # Deviation #1: kind's built-in default StorageClass (local-path-
+      # provisioner), not AKS's "managed-csi" -- there's no Azure Disk
+      # CSI driver locally.
+      storageClassName: "standard"
+      accessModes:
+        - ReadWriteOnce
+      requests:
+        storage: "5Gi" # smaller than terraform.tfvars.example's 50Gi -- local disk, not an Azure Disk
+
+services:
+  neo4j:
+    enabled: true
+    spec:
+      # Deviation #2: ClusterIP, not LoadBalancer -- vanilla kind has no
+      # cloud-provider backing LoadBalancer Services (they'd stay
+      # <pending> forever). Reach it via `kubectl -n neo4j port-forward`
+      # or exec cypher-shell from inside a pod instead (see validate.sh).
+      type: ClusterIP
+
+nodeSelector:
+  workloadsize: small
+
+podSpec:
+  tolerations:
+    - key: "workloadsize"
+      operator: "Equal"
+      value: "small"
+      effect: "NoSchedule"
+
+# Deviation #3: no `config` block -- terraform/neo4j.tf's OIDC/Entra config
+# is Azure-specific and irrelevant to validating the clustering/HA/ingress
+# layer this harness targets. Native auth only.

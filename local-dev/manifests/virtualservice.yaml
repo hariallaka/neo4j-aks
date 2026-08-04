@@ -1,0 +1,22 @@
+# Mirrors kubectl_manifest.neo4j_reverse_proxy_virtualservice in
+# terraform/ingress.tf. destination.host's service name follows the
+# neo4j-reverse-proxy chart's own naming template
+# ("<release>-reverseproxy-service" -- see ingress.tf's comments) for the
+# release name validate.sh installs it under
+# ("neo4j-aks-local-reverse-proxy").
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: neo4j-aks-local-reverse-proxy-vs
+  namespace: neo4j
+spec:
+  hosts:
+    - "neo4j.local.test"
+  gateways:
+    - neo4j-aks-local-reverse-proxy-gateway
+  http:
+    - route:
+        - destination:
+            host: neo4j-aks-local-reverse-proxy-reverseproxy-service.neo4j.svc.cluster.local
+            port:
+              number: 80

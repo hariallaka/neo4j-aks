@@ -12,6 +12,7 @@ principal) access via Neo4j's native OIDC/SSO support.
 terraform/            AKS cluster, node pools, Key Vault, Neo4j Helm release.
 onboarding/            Cypher templates + shell runner to onboard/offboard a tenant or identity.
 azure-pipelines/       Azure DevOps pipeline YAML that runs the onboarding scripts on demand.
+local-dev/             kind-based local harness for validating the Kubernetes/Helm/Istio layer without a real AKS cluster.
 ```
 
 ## Architecture
@@ -404,6 +405,14 @@ This was written and tested in a sandbox with no live Azure subscription
 and whose network egress policy blocks `registry.terraform.io` (confirmed
 via a 403 on `terraform init` — not something to route around per that
 policy). Given that, what was actually done:
+
+**Local validation:** there's no local emulator for AKS/Azure itself, but
+`local-dev/` has a `kind`-based harness that validates the Kubernetes/
+Helm/Istio layer (chart values, taints/tolerations, clustering, Istio
+`Gateway`/`VirtualService`) against a real local Kubernetes API server —
+see `local-dev/README.md` for what it does and doesn't prove, and its own
+caveats about not having been run end-to-end in this sandbox either (no
+Docker daemon here).
 
 - `terraform fmt -check -diff -recursive` passes clean on every `.tf` file
   (the `neo4j_cluster_size`/multi-release changes were hand-aligned to
