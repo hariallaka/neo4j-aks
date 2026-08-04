@@ -227,30 +227,38 @@ variable "neo4j_oidc_client_id" {
 
 variable "neo4j_reverse_proxy_enabled" {
   type        = bool
-  description = "Deploy ingress-nginx plus Neo4j's own \"neo4j-reverse-proxy\" chart in front of Neo4j (see ingress.tf), tunneling Bolt and HTTP through a single ingress host on 443 via WebSocket -- for end users who can only reach a raw HTTP(S) port, not Bolt's 7687 directly. Both run on the tainted \"system\" node pool (aks.tf) via an explicit toleration for its CriticalAddonsOnly taint, a deliberate exception rather than a general loosening of that pool's restriction -- see the README's reverse-proxy section for the trade-offs of that placement."
+  description = "Deploy Neo4j's own \"neo4j-reverse-proxy\" chart plus an Istio Gateway/VirtualService in front of it (see ingress.tf), tunneling Bolt and HTTP through a single host on 443 via WebSocket -- for end users who can only reach a raw HTTP(S) port, not Bolt's 7687 directly. Assumes Istio (istiod + an ingress gateway) is already installed/managed in this cluster outside this stack; this only creates the routing objects and the neo4j-reverse-proxy backend, plus a dedicated \"ingress\" node pool (node_pools.tf) for edge workloads -- it does not install Istio itself."
   default     = false
 }
 
 variable "neo4j_reverse_proxy_host" {
   type        = string
-  description = "Hostname end users connect to through the reverse proxy; used as the Ingress host. Required when neo4j_reverse_proxy_enabled = true. DNS for this host and (if used) the TLS certificate itself are outside this stack -- point it at the ingress-nginx controller's LoadBalancer IP once known (see README)."
+  description = "Hostname end users connect to through the reverse proxy; used as the Istio Gateway/VirtualService host. Required when neo4j_reverse_proxy_enabled = true. DNS for this host and (if used) the TLS certificate itself are outside this stack -- point it at your Istio ingress gateway's LoadBalancer IP once known (see README)."
   default     = ""
 }
 
 variable "neo4j_reverse_proxy_tls_secret_name" {
   type        = string
-  description = "Name of an existing Kubernetes TLS Secret, in the Neo4j namespace, for the Ingress to terminate TLS with. Leave empty to run without chart-managed TLS (e.g. if a different mechanism -- ingress annotations, cert-manager -- handles it instead). Provisioning the certificate itself is outside this stack."
+  description = "Name of an existing Kubernetes TLS Secret for the Istio Gateway to terminate TLS with (Gateway's `tls.credentialName`). Leave empty to run the Gateway as plain HTTP on port 80 instead. Note: Istio's ingress gateway typically needs this Secret to live in *its own* namespace (commonly istio-system), not the Neo4j namespace -- confirm against how your Istio install's SDS/credential access is configured; provisioning the certificate itself is outside this stack."
   default     = ""
 }
 
-variable "ingress_nginx_helm_repo_url" {
+variable "ingress_pool_vm_size" {
   type        = string
-  description = "Helm chart repository URL for ingress-nginx (a separate project/repo from Neo4j's own charts). Point this at an internal mirror if kubernetes.github.io isn't reachable from your network -- same proxy-cache consideration as neo4j_helm_repo_url."
-  default     = "https://kubernetes.github.io/ingress-nginx"
+  description = "VM size for the dedicated \"ingress\" node pool (node_pools.tf), used by the Istio ingress gateway and the neo4j-reverse-proxy pod. Only created when neo4j_reverse_proxy_enabled = true."
+  default     = "Standard_D4s_v5"
 }
 
-variable "ingress_nginx_chart_version" {
-  type        = string
-  description = "Pin the ingress-nginx chart version. Leave empty to install whatever version the configured repo currently resolves as latest."
-  default     = ""
+variable "ingress_pool_node_count" {
+  type        = number
+  description = "Node count for the dedicated \"ingress\" node pool. Only created when neo4j_reverse_proxy_enabled = true."
+  default     = 2
+}
+
+variable "istio_ingress_gateway_selector" {
+  type        = map(string)
+  description = "Pod label selector matching your existing Istio ingress gateway workload -- used as the Gateway resource's `spec.selector` so it binds to that gateway rather than creating a new one. Default (\"istio: ingressgateway\") matches Istio's own default ingress gateway install; override if your gateway uses different labels."
+  default = {
+    istio = "ingressgateway"
+  }
 }

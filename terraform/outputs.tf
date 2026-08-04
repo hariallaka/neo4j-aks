@@ -55,11 +55,16 @@ output "neo4j_oidc_configured" {
 }
 
 output "neo4j_reverse_proxy_enabled" {
-  description = "Whether ingress-nginx + neo4j-reverse-proxy were deployed (var.neo4j_reverse_proxy_enabled)."
+  description = "Whether the neo4j-reverse-proxy chart + Istio Gateway/VirtualService were deployed (var.neo4j_reverse_proxy_enabled)."
   value       = var.neo4j_reverse_proxy_enabled
 }
 
-output "ingress_nginx_namespace" {
-  description = "Namespace the ingress-nginx controller was installed into, once neo4j_reverse_proxy_enabled = true. Find its external IP with `kubectl -n <this> get svc` (see README)."
-  value       = var.neo4j_reverse_proxy_enabled ? kubernetes_namespace.ingress_nginx[0].metadata[0].name : null
+output "neo4j_reverse_proxy_service" {
+  description = "In-cluster DNS name of the neo4j-reverse-proxy Service that the Istio Gateway/VirtualService route to, once neo4j_reverse_proxy_enabled = true."
+  value       = var.neo4j_reverse_proxy_enabled ? "${local.neo4j_reverse_proxy_service_name}.${kubernetes_namespace.neo4j.metadata[0].name}.svc.cluster.local" : null
+}
+
+output "ingress_node_pool_name" {
+  description = "Name of the dedicated \"ingress\" node pool, once neo4j_reverse_proxy_enabled = true. Give this pool's label/taint (workload=ingress) to whoever manages your Istio ingress gateway install if you want its pods scheduled here too -- see README."
+  value       = var.neo4j_reverse_proxy_enabled ? azurerm_kubernetes_cluster_node_pool.ingress[0].name : null
 }

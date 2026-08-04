@@ -52,13 +52,19 @@ neo4j_helm_chart_version = "" # e.g. "2026.6.0" to pin; "" = latest
 # Leave "" until the one-time Entra app registration in README.md is done.
 neo4j_oidc_client_id = ""
 
-# Opt-in: ingress-nginx + Neo4j's own neo4j-reverse-proxy chart in front of
-# Neo4j, for end users who can only reach 80/443 (not Bolt's 7687 directly).
-# See README's reverse-proxy section before enabling -- both run on the
-# tainted "system" node pool via an explicit toleration, a deliberate
-# exception to that pool's normal add-ons-only restriction.
+# Opt-in: Neo4j's own neo4j-reverse-proxy chart + an Istio Gateway/
+# VirtualService in front of it, for end users who can only reach 80/443
+# (not Bolt's 7687 directly). Assumes Istio is already installed/managed
+# in this cluster outside this stack -- see README's reverse-proxy section
+# before enabling. Both the reverse-proxy pod and (once you've pointed
+# your Istio gateway install at it too, per the README) the ingress
+# gateway run on a dedicated "ingress" node pool (node_pools.tf), not the
+# tenant small/large pools or the tainted system pool.
 neo4j_reverse_proxy_enabled         = false
 neo4j_reverse_proxy_host            = "" # required if enabled, e.g. "neo4j.example.com"
-neo4j_reverse_proxy_tls_secret_name = "" # existing k8s TLS secret name, or "" for no chart-managed TLS
-ingress_nginx_helm_repo_url         = "https://kubernetes.github.io/ingress-nginx"
-ingress_nginx_chart_version         = "" # "" = latest
+neo4j_reverse_proxy_tls_secret_name = "" # existing k8s TLS secret (Gateway credentialName), or "" for plain HTTP
+ingress_pool_vm_size                = "Standard_D4s_v5"
+ingress_pool_node_count             = 2
+istio_ingress_gateway_selector = {
+  istio = "ingressgateway" # match your existing Istio ingress gateway's pod labels
+}

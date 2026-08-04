@@ -198,66 +198,97 @@ you want to add them:
 | `neo4j-persistent-volume` / `neo4j-docker-desktop-pv` | Pre-provision disks/PVs for the `neo4j` chart to bind to, for storage setups where dynamic provisioning (what `neo4j.tf` uses via `managed-csi`) isn't the right fit, or for local Docker Desktop Kubernetes. | Not needed here — AKS's `managed-csi` dynamic provisioning already covers this. |
 | `neo4j-reverse-proxy` | Deploys a small reverse-proxy pod that fronts both HTTP (Browser) and Bolt traffic behind a single port via WebSocket tunneling, wired through an `ingress-nginx` or `haproxy-ingress` Kubernetes Ingress. Built for networks where only 80/443 egress is allowed. | **Wired in** — see the next section (`terraform/ingress.tf`, `var.neo4j_reverse_proxy_enabled`). |
 
-### Fronting Neo4j with ingress-nginx (`terraform/ingress.tf`)
+### Fronting Neo4j through Istio (`terraform/ingress.tf`)
 
-`var.neo4j_reverse_proxy_enabled` (default `false`) deploys **ingress-nginx
-+ Neo4j's own `neo4j-reverse-proxy` chart**, for end users who can only
-reach a raw HTTP(S) port (443) — not Bolt's 7687 directly. This is
-**in-cluster**, not a VM: a Kubernetes `Ingress` object is HTTP(S)-only by
-design, so plain TCP can't go through it — `neo4j-reverse-proxy` is what
-actually tunnels Bolt over WebSocket through the Ingress; ingress-nginx
-just does normal host-based HTTP(S) routing to that proxy pod.
+`var.neo4j_reverse_proxy_enabled` (default `false`) deploys **Neo4j's own
+`neo4j-reverse-proxy` chart plus an Istio `Gateway`/`VirtualService`**, for
+end users who can only reach a raw HTTP(S) port (443) — not Bolt's 7687
+directly. **This assumes Istio (istiod + an ingress gateway) is already
+installed and managed in this AKS cluster outside this stack** — `ingress.tf`
+doesn't install Istio itself, only the routing objects and the
+`neo4j-reverse-proxy` backend they point at. A Kubernetes `Ingress`/Istio
+`VirtualService` is HTTP(S)-only by design, so plain TCP can't go through
+it — `neo4j-reverse-proxy` is what actually tunnels Bolt over WebSocket;
+Istio just routes normal HTTP(S) traffic to that pod like any other
+backend. Istio/Envoy handles the WebSocket upgrade automatically for HTTP
+routes — no special `VirtualService` config needed for that part.
 
-- **`helm_release.ingress_nginx`** installs the community ingress-nginx
-  controller into its own `ingress-nginx` namespace, from
-  `var.ingress_nginx_helm_repo_url` (a separate repo/project from Neo4j's
-  own charts — mirror it separately if needed, same proxy-cache
-  consideration as `neo4j_helm_repo_url` below).
-- **`helm_release.neo4j_reverse_proxy`** installs Neo4j's chart (from the
-  same repo/version line as `neo4j` itself, so it also honors
+- **`helm_release.neo4j_reverse_proxy`** installs Neo4j's chart (same
+  repo/version line as `neo4j` itself, so it also honors
   `neo4j_helm_repo_url`/`neo4j_helm_chart_version`), pointed at
-  `<neo4j_release_name>-lb-neo4j` — the name of the neo4j chart's own
-  shared external Service (confirmed against Neo4j's "Access the Neo4j
-  cluster from outside Kubernetes" doc) — with `ingress.host =
-  var.neo4j_reverse_proxy_host` and, if `neo4j_reverse_proxy_tls_secret_name`
-  is set, TLS termination against that existing Secret. **Required:** set
-  `neo4j_reverse_proxy_host` (used as the Ingress host) whenever this is
-  enabled — enforced by a `check` block, not a hard variable validation,
-  since it depends on another variable.
-- **Node placement — read this before enabling.** Both components run on
-  the AKS **system** node pool (`aks.tf`'s `default_node_pool`), which is
-  tainted `CriticalAddonsOnly=true:NoSchedule` specifically to keep
-  general workloads off it (see `aks.tf`'s comments) — it was sized for
-  cluster add-ons only, not real ingress traffic. `ingress.tf` schedules
-  onto it via an **explicit toleration** on just these two workloads
-  (using the `kubernetes.azure.com/mode: system` label AKS applies to
-  System-mode pools automatically as the `nodeSelector`) — that's a
-  deliberate, scoped exception, not a change to the taint itself, so
-  nothing else starts landing there. If you're routing meaningful traffic
-  through it, revisit `node_count`/`node_vm_size` (currently sized as if
-  only add-ons ran there) — this repo doesn't resize it automatically.
-  `neo4j_reverse_proxy` itself schedules onto the same tenant pool Neo4j
-  uses (`neo4j_node_pool_tier`), not the system pool — it's Neo4j-adjacent,
-  not a platform/ingress component.
-- **After `apply`:** `kubectl -n ingress-nginx get svc` to find the
-  controller's external IP, then point `neo4j_reverse_proxy_host`'s DNS
-  record at it. End users connect the same way they always would —
-  `neo4j://<reverse_proxy_host>` (or `neo4j+s://` once TLS is wired up) —
-  nothing Bolt-driver-specific to configure on their end; the WebSocket
-  tunneling is invisible to the driver.
-- TLS certificate provisioning itself (cert-manager, Key Vault, a manually
-  created Secret, etc.) is outside this stack — `neo4j_reverse_proxy_tls_secret_name`
-  only tells the chart which existing Secret to use.
+  `<neo4j_release_name>-lb-neo4j` — the neo4j chart's own shared external
+  Service (confirmed against Neo4j's "Access the Neo4j cluster from
+  outside Kubernetes" doc). The chart's **own** `reverseProxy.ingress` is
+  left `enabled: false` — Istio does the routing, not a chart-managed
+  `Ingress` object — but its Service (`<release>-reverseproxy-service`)
+  is still created and is what the `VirtualService` targets.
+- **`kubectl_manifest.neo4j_reverse_proxy_gateway`** — an Istio `Gateway`
+  binding to your **existing** ingress gateway workload via
+  `var.istio_ingress_gateway_selector` (default `{istio:
+  ingressgateway}`, Istio's own default label — override if yours differs)
+  rather than provisioning a new gateway. Listens on 443/HTTPS with
+  `tls.credentialName = neo4j_reverse_proxy_tls_secret_name` if set, else
+  plain 80/HTTP.
+- **`kubectl_manifest.neo4j_reverse_proxy_virtualservice`** — routes
+  `neo4j_reverse_proxy_host` through that Gateway to the reverse-proxy
+  Service. Both CRD resources go through the `gavinbunney/kubectl`
+  provider's `kubectl_manifest` (added in `versions.tf`/`providers.tf`) —
+  the mainline `hashicorp/kubernetes` provider has no generic resource for
+  arbitrary CRDs, and Istio's own CRDs obviously aren't installed by this
+  stack for a typed provider to target. **Required:**
+  `neo4j_reverse_proxy_host` whenever this is enabled — enforced by a
+  `check` block (depends on another variable, so it can't be a plain
+  variable `validation`).
+- **TLS secret location — an Istio-specific gotcha.** Istio's ingress
+  gateway typically needs `tls.credentialName`'s Secret to live in **its
+  own** namespace (commonly `istio-system`), not the Neo4j namespace,
+  for its SDS credential access to see it — confirm this against however
+  your specific Istio install is configured (cross-namespace secret
+  discovery is possible but not default). Provisioning the certificate
+  itself (cert-manager, Key Vault, a manually created Secret) is outside
+  this stack either way.
+- **Node placement.** Both the `neo4j-reverse-proxy` pod and (once
+  someone points the existing gateway install at it — see next) the Istio
+  ingress gateway itself run on a **dedicated `ingress` node pool**
+  (`azurerm_kubernetes_cluster_node_pool.ingress` in `node_pools.tf`, only
+  created when `neo4j_reverse_proxy_enabled = true`) — not the tenant
+  `small`/`large` pools Neo4j uses, and not the AKS system pool. Sized via
+  `ingress_pool_vm_size`/`ingress_pool_node_count`.
+- **This repo creating the `ingress` pool does not, by itself, move the
+  already-installed Istio ingress gateway onto it** — that gateway's
+  Deployment is managed outside this repo, so someone needs to add a
+  matching `nodeSelector`/`toleration` on that side:
+  ```yaml
+  nodeSelector:
+    workload: ingress
+  tolerations:
+    - key: workload
+      operator: Equal
+      value: ingress
+      effect: NoSchedule
+  ```
+  (`terraform output ingress_node_pool_name` confirms the pool exists once
+  applied.) Until that's done, the gateway keeps running wherever it runs
+  today — routing still works either way, since Istio's Gateway/
+  VirtualService bind by pod label, not by node pool.
+- **After `apply`:** find your Istio ingress gateway's external IP (however
+  you normally do — e.g. `kubectl -n istio-system get svc`) and point
+  `neo4j_reverse_proxy_host`'s DNS record at it. End users then connect the
+  same way they always would — `neo4j://<reverse_proxy_host>` (or
+  `neo4j+s://` once TLS is wired up) — nothing Bolt-driver-specific to
+  configure on their end; the WebSocket tunneling is invisible to the
+  driver.
 
 **If your actual goal is just "one shared front door" rather than
 "80/443-only egress,"** this specific setup is more than you need: a plain
-ingress-nginx `tcp-services` ConfigMap doing L4 passthrough straight to
-`services.neo4j` (Neo4j's own LoadBalancer Service, `neo4j.tf`) is simpler
-and works the same way described under **High availability (clustering)**
-above (server-side routing makes it transparent to the `neo4j://` driver
-either way) — that path isn't what `ingress.tf` sets up, since it's solving
-a different problem than Bolt-over-WebSocket tunneling. Say the word if
-that's actually what you want and I'll wire that up instead/as well.
+Istio `Gateway` with `protocol: TCP` (or `TLS` for passthrough), routing
+straight to `services.neo4j` (Neo4j's own LoadBalancer Service, `neo4j.tf`)
+via a `TCPRoute`-style `VirtualService`, is simpler and works the same way
+described under **High availability (clustering)** above (server-side
+routing makes it transparent to the `neo4j://` driver either way) — that
+isn't what `ingress.tf` sets up, since it's solving a different problem
+than Bolt-over-WebSocket tunneling. Say the word if that's actually what
+you want and I'll wire that up instead/as well.
 
 ### Multi-tenant identity model
 
@@ -425,22 +456,40 @@ policy). Given that, what was actually done:
   "Access the Neo4j cluster from outside Kubernetes" operations-manual
   page (fetched directly — see Sources), not asserted from general nginx/
   Bolt knowledge alone.
-- `terraform/ingress.tf`'s `helm_release.ingress_nginx`/
-  `helm_release.neo4j_reverse_proxy` values were rendered through Python's
-  `yaml` module the same way as `neo4j.tf`'s, to confirm the shape
-  matches each chart's own `values.yaml` (`controller.tolerations`/
-  `nodeSelector`/`service.type` for ingress-nginx;
-  `reverseProxy.serviceName`/`namespace`/`nodeSelector`/`tolerations`/
-  `ingress.{enabled,className,host,tls}` for `neo4j-reverse-proxy`). The
-  `<neo4j.name>-lb-neo4j` Service name used for `reverseProxy.serviceName`
+- `terraform/ingress.tf`'s `helm_release.neo4j_reverse_proxy` values, and
+  the `kubectl_manifest` Gateway/VirtualService `yaml_body`s, were
+  rendered through Python's `yaml` module the same way as `neo4j.tf`'s, to
+  confirm the shape matches: the `neo4j-reverse-proxy` chart's own
+  `values.yaml` (`reverseProxy.serviceName`/`namespace`/`nodeSelector`/
+  `tolerations`/`ingress.enabled`); and Istio's own `Gateway`/
+  `VirtualService` API shape (`spec.selector`/`spec.servers[].port,tls,hosts`
+  for Gateway, `spec.hosts`/`spec.gateways`/`spec.http[].route[].destination.host,port`
+  for VirtualService), checked against Istio's own config reference docs
+  (see Sources), not guessed.
+- The `<neo4j.name>-lb-neo4j` Service name used for `reverseProxy.serviceName`
   matches the literal example in Neo4j's own "Access outside Kubernetes"
-  doc, not a guess. The ingress-nginx `tcp-services`
-  ConfigMap mechanism (mentioned as the alternative for a plain shared
-  front door, not implemented here) was checked against the
-  ingress-nginx project's own docs, not guessed. None of this was run
-  against a real cluster in this sandbox (no live AKS, and `helm.neo4j.com`/
-  `kubernetes.github.io`/`github.com` were all unreachable here — see the
-  chart-repo-access note above).
+  doc. The reverse-proxy chart's own generated Service name
+  (`<release>-reverseproxy-service`, used in the VirtualService's
+  `destination.host`) was derived from its `templates/ingress.yaml` and
+  `templates/_helpers.tpl` (fetched directly — both reference
+  `{{ include "neo4j.reverseProxy.fullname" . }}-reverseproxy-service`) —
+  **not directly confirmed**, since this sandbox's network couldn't fetch
+  the chart's `templates/service.yaml` (guessed several plausible
+  filenames, all 404); double-check the actual Service name/port after a
+  real `helm install` before assuming the `VirtualService` in
+  `ingress.tf` is exactly right.
+- That `reverseProxy.ingress.enabled: false` still leaves the chart's
+  Service (as opposed to just its Ingress) in place is inferred from the
+  template only wrapping the `Ingress` `kind` in that conditional, not
+  independently confirmed against the Service template for the same
+  reason above.
+- `gavinbunney/kubectl`'s `kubectl_manifest` (not a HashiCorp provider)
+  was used because the mainline `hashicorp/kubernetes` provider has no
+  generic resource for arbitrary CRDs like Istio's — this is the
+  established community pattern for exactly this, not an untested choice,
+  but wasn't applied against a real cluster in this sandbox (no live AKS,
+  and `helm.neo4j.com`/`istio.io`/`github.com` were all unreachable here —
+  see the chart-repo-access note above).
 - Every `azurerm_kubernetes_cluster`/`azurerm_kubernetes_cluster_node_pool`/
   `azurerm_key_vault` argument used here (`azure_active_directory_role_based_access_control`,
   `network_profile`, `key_vault_secrets_provider`, `microsoft_defender`,
@@ -486,8 +535,10 @@ against a real Neo4j instance before turning dry-run off.
 - [Configuring the Neo4j Helm chart repository — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/kubernetes/helm-charts-setup.adoc)
 - [Access the Neo4j cluster from outside Kubernetes — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/kubernetes/quickstart-cluster/access-outside-k8s.adoc)
 - [neo4j/helm-charts repo — chart index](https://raw.githubusercontent.com/neo4j/helm-charts/master/index.yaml) and [Chart.yaml/values.yaml for neo4j-reverse-proxy, neo4j-admin, neo4j-headless-service, neo4j-persistent-volume, neo4j-docker-desktop-pv](https://github.com/neo4j/helm-charts/tree/dev)
-- [Exposing TCP and UDP services — Ingress-Nginx Controller](https://kubernetes.github.io/ingress-nginx/user-guide/exposing-tcp-udp-services/)
 - [AKS system node pool restrictions (`only_critical_addons_enabled`) — Terraform `azurerm_kubernetes_cluster` docs](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster)
+- [Istio Gateway configuration reference](https://istio.io/latest/docs/reference/config/networking/gateway/)
+- [Istio VirtualService configuration reference](https://istio.io/latest/docs/reference/config/networking/virtual-service/)
+- [kubectl_manifest (gavinbunney/kubectl Terraform provider docs)](https://registry.terraform.io/providers/gavinbunney/kubectl/latest/docs/resources/manifest)
 - [azurerm_kubernetes_cluster (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster)
 - [azurerm_kubernetes_cluster_node_pool (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster_node_pool)
 - [azurerm_key_vault (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/key_vault)

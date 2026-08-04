@@ -26,5 +26,14 @@ terraform {
       source  = "hashicorp/null"
       version = "~> 3.2"
     }
+    # Applies raw Kubernetes manifests -- used for the Istio Gateway/
+    # VirtualService CRDs in ingress.tf, since the mainline kubernetes
+    # provider has no generic resource for arbitrary CRDs (Istio isn't
+    # installed by this stack -- see ingress.tf -- so there's no typed
+    # Terraform resource for its CRDs to use instead).
+    kubectl = {
+      source  = "gavinbunney/kubectl"
+      version = "~> 1.14"
+    }
   }
 }
