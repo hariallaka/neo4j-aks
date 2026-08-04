@@ -35,10 +35,11 @@ neo4j_storage_class            = "managed-csi"
 neo4j_data_disk_size_gb        = 50
 neo4j_node_pool_tier           = "small"
 
-# Number of Neo4j cluster members (Helm releases/pods) for HA. 1 = standalone.
-# 3+ requires enterprise + a valid license -- see README's HA/licensing section
-# before turning this up if your license is scoped to a single instance.
-neo4j_cluster_size = 3
+# Number of Neo4j cluster members (Helm releases/pods) for HA. 1 = standalone
+# (default -- matches a single-instance license). 3+ requires enterprise +
+# a valid license -- see README's HA/licensing section before turning this
+# up if your license is scoped to a single instance.
+neo4j_cluster_size = 1
 
 # Leave "" until the one-time Entra app registration in README.md is done.
 neo4j_oidc_client_id = ""

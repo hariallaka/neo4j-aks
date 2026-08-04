@@ -147,8 +147,8 @@ variable "neo4j_accept_license_agreement" {
 
 variable "neo4j_cluster_size" {
   type        = number
-  description = "Number of Neo4j cluster members to deploy, each as its own Helm release/pod (see neo4j.tf). 1 = standalone, no clustering. 3+ enables Neo4j causal clustering for HA: fault tolerance follows M = 2F+1, so 3 members tolerate 1 failure and keep write availability, 5 tolerate 2, etc. Clustering requires neo4j_edition = \"enterprise\" and a valid license (neo4j_accept_license_agreement = \"yes\" or \"eval\") -- see the README's HA section for the licensing caveat."
-  default     = 3
+  description = "Number of Neo4j cluster members to deploy, each as its own Helm release/pod (see neo4j.tf). 1 = standalone, no clustering (default -- matches a single-instance license). 3+ enables Neo4j causal clustering for HA: fault tolerance follows M = 2F+1, so 3 members tolerate 1 failure and keep write availability, 5 tolerate 2, etc. Clustering requires neo4j_edition = \"enterprise\" and a valid license (neo4j_accept_license_agreement = \"yes\" or \"eval\") -- see the README's HA section for the licensing caveat before raising this above 1."
+  default     = 1
 
   validation {
     condition     = var.neo4j_cluster_size >= 1

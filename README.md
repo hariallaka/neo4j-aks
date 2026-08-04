@@ -40,9 +40,9 @@ azure-pipelines/       Azure DevOps pipeline YAML that runs the onboarding scrip
   default), not a Helm release per tenant. Multi-tenancy is Neo4j's own
   multi-database feature: each onboarded usecase gets its own `CREATE
   DATABASE`, with roles/privileges scoped to that database.
-- Deployed as `var.neo4j_cluster_size` cluster members (default `3`), each
-  its own Helm release/pod/PVC — see **High availability (clustering)**
-  below for how that works and what it requires.
+- Deployed as `var.neo4j_cluster_size` cluster members (default `1`,
+  standalone), each its own Helm release/pod/PVC — see **High availability
+  (clustering)** below for how that works and what it requires.
 - The generated admin password (`random_password.neo4j`) is stored in an
   Azure Key Vault (`azurerm_key_vault.this`) as `neo4j-admin-password`, in
   addition to being a Terraform output — treat your Terraform state as
@@ -55,7 +55,7 @@ azure-pipelines/       Azure DevOps pipeline YAML that runs the onboarding scrip
 
 ## High availability (clustering)
 
-`var.neo4j_cluster_size` (default `3`) controls how many Neo4j cluster
+`var.neo4j_cluster_size` (default `1`, standalone) controls how many Neo4j cluster
 members get deployed. Neo4j HA isn't a replica count on one Deployment —
 each member is its own Helm release, tied to the others by a shared
 `neo4j.name` (`var.neo4j_release_name`), same admin password, and the same
@@ -64,9 +64,10 @@ each member is its own Helm release, tied to the others by a shared
 (`<neo4j_release_name>-0`, `-1`, `-2`, ...; `neo4j_cluster_size = 1` keeps
 the original single, unsuffixed release name).
 
-- **Set `neo4j_cluster_size = 1`** for a standalone instance (no
-  clustering, the behavior before HA support existed).
-- **Set it to `3` (default) or `5`** for clustering. Neo4j's fault
+- **`neo4j_cluster_size = 1`** (default) is a standalone instance — no
+  clustering, matching a single-instance license and the behavior before
+  HA support existed.
+- **Set it to `3` or `5`** for clustering. Neo4j's fault
   tolerance follows `M = 2F+1`: 3 members tolerate 1 failure and keep
   write availability, 5 tolerate 2. It must be **odd** — Raft consensus
   needs a majority, and an even member count adds a node without adding
