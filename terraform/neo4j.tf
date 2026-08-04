@@ -48,6 +48,12 @@ locals {
     "dbms.security.oidc.azure.params"          = "client_id=${var.neo4j_oidc_client_id};response_type=code;scope=openid profile email api://${var.neo4j_oidc_client_id}/access-token"
   } : {}
 
+  # One Helm values map shared by every cluster member: Neo4j clustering
+  # ties members together by `neo4j.name` (identical across all of them),
+  # not by Helm release name (which is unique per member -- see
+  # helm_release.neo4j below). Every member also needs the same
+  # minimumClusterSize so each one waits for the others to appear before
+  # reporting ready.
   neo4j_helm_values = {
     # neo4j.name is mandatory: it ties together members of the same logical
     # Neo4j deployment; installation fails without it.
@@ -55,10 +61,15 @@ locals {
       name                   = var.neo4j_release_name
       edition                = var.neo4j_edition
       acceptLicenseAgreement = var.neo4j_accept_license_agreement
+      minimumClusterSize     = var.neo4j_cluster_size
       resources = {
         cpu    = var.neo4j_cpu
         memory = var.neo4j_memory
       }
+      # podSpec.podAntiAffinity defaults to true in the chart, which already
+      # prevents two members sharing `neo4j.name` from landing on the same
+      # AKS node -- see the node pool capacity check below for why the
+      # target node pool still needs at least neo4j_cluster_size nodes.
     }
 
     # volumes.data.mode has no default in the chart and must be set
@@ -108,13 +119,26 @@ locals {
 
     config = local.neo4j_oidc_config
   }
+
+  # One Helm release per cluster member (neo4j_cluster_size = 1 keeps the
+  # original single-release name, unchanged from before HA support existed).
+  # The chart's `services.neo4j` LoadBalancer Service is keyed off
+  # `neo4j.name`, not the release name, and carries a `helm.sh/resource-
+  # policy: keep` annotation -- so it's shared/reconciled across all members
+  # as one Service rather than one-per-pod.
+  neo4j_release_names = {
+    for i in range(var.neo4j_cluster_size) :
+    tostring(i) => var.neo4j_cluster_size > 1 ? "${var.neo4j_release_name}-${i}" : var.neo4j_release_name
+  }
 }
 
 # Official Neo4j chart (neo4j/helm-charts, repo https://helm.neo4j.com/neo4j,
 # chart name "neo4j" -- confirmed against the chart's own values.yaml, not
 # the older/deprecated neo4j-contrib/neo4j-helm chart).
 resource "helm_release" "neo4j" {
-  name       = var.neo4j_release_name
+  for_each = local.neo4j_release_names
+
+  name       = each.value
   namespace  = kubernetes_namespace.neo4j.metadata[0].name
   repository = "https://helm.neo4j.com/neo4j"
   chart      = "neo4j"
@@ -130,4 +154,45 @@ resource "helm_release" "neo4j" {
     azurerm_kubernetes_cluster_node_pool.small,
     azurerm_kubernetes_cluster_node_pool.large,
   ]
+}
+
+# Cluster-wide PodDisruptionBudget spanning all members (the chart's own
+# per-release podDisruptionBudget only covers that one release's single
+# pod -- see the comment above `podDisruptionBudget` in the chart's
+# values.yaml). Selects on the label every member shares regardless of its
+# individual release name. maxUnavailable is the same F as in the
+# fault-tolerance formula M = 2F+1, so a rolling AKS node drain can't ever
+# take down more members than the cluster can already tolerate losing.
+resource "kubernetes_pod_disruption_budget_v1" "neo4j_cluster" {
+  count = var.neo4j_cluster_size >= 3 ? 1 : 0
+
+  metadata {
+    name      = "${var.neo4j_release_name}-cluster"
+    namespace = kubernetes_namespace.neo4j.metadata[0].name
+  }
+
+  spec {
+    max_unavailable = tostring(floor((var.neo4j_cluster_size - 1) / 2))
+
+    selector {
+      match_labels = {
+        "helm.neo4j.com/neo4j.name" = var.neo4j_release_name
+      }
+    }
+  }
+}
+
+# Non-blocking sanity checks, surfaced as warnings on `plan`/`apply`.
+check "neo4j_cluster_requirements" {
+  assert {
+    condition     = var.neo4j_cluster_size == 1 || (var.neo4j_edition == "enterprise" && contains(["yes", "eval"], var.neo4j_accept_license_agreement))
+    error_message = "neo4j_cluster_size > 1 enables Neo4j clustering, which requires Enterprise Edition (neo4j_edition = \"enterprise\") and a license (neo4j_accept_license_agreement = \"yes\" or \"eval\"). Community Edition and unlicensed Enterprise Edition can't cluster."
+  }
+}
+
+check "neo4j_node_pool_capacity" {
+  assert {
+    condition     = var.neo4j_cluster_size <= (var.neo4j_node_pool_tier == "small" ? var.small_pool_node_count : var.large_pool_node_count)
+    error_message = "neo4j_cluster_size exceeds the node count of the target node pool (neo4j_node_pool_tier). The chart's default podAntiAffinity keeps two members off the same node, so the pool needs at least neo4j_cluster_size nodes or some member pods will stay Pending."
+  }
 }

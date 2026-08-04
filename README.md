@@ -40,6 +40,9 @@ azure-pipelines/       Azure DevOps pipeline YAML that runs the onboarding scrip
   default), not a Helm release per tenant. Multi-tenancy is Neo4j's own
   multi-database feature: each onboarded usecase gets its own `CREATE
   DATABASE`, with roles/privileges scoped to that database.
+- Deployed as `var.neo4j_cluster_size` cluster members (default `3`), each
+  its own Helm release/pod/PVC — see **High availability (clustering)**
+  below for how that works and what it requires.
 - The generated admin password (`random_password.neo4j`) is stored in an
   Azure Key Vault (`azurerm_key_vault.this`) as `neo4j-admin-password`, in
   addition to being a Terraform output — treat your Terraform state as
@@ -49,6 +52,62 @@ azure-pipelines/       Azure DevOps pipeline YAML that runs the onboarding scrip
   `config` map) only once `neo4j_oidc_client_id` is set — see **One-time
   Entra ID setup** below. Until then the stack applies fine with native
   auth only.
+
+## High availability (clustering)
+
+`var.neo4j_cluster_size` (default `3`) controls how many Neo4j cluster
+members get deployed. Neo4j HA isn't a replica count on one Deployment —
+each member is its own Helm release, tied to the others by a shared
+`neo4j.name` (`var.neo4j_release_name`), same admin password, and the same
+`minimumClusterSize`. `neo4j.tf` loops `helm_release.neo4j` over
+`local.neo4j_release_names` to install one release per member
+(`<neo4j_release_name>-0`, `-1`, `-2`, ...; `neo4j_cluster_size = 1` keeps
+the original single, unsuffixed release name).
+
+- **Set `neo4j_cluster_size = 1`** for a standalone instance (no
+  clustering, the behavior before HA support existed).
+- **Set it to `3` (default) or `5`** for clustering. Neo4j's fault
+  tolerance follows `M = 2F+1`: 3 members tolerate 1 failure and keep
+  write availability, 5 tolerate 2. It must be **odd** — Raft consensus
+  needs a majority, and an even member count adds a node without adding
+  fault tolerance (enforced by a `validation` block on the variable).
+- Pod anti-affinity (keeping members off the same AKS node) is the chart's
+  own default (`podSpec.podAntiAffinity: true`) — nothing extra to
+  configure — but the target node pool (`neo4j_node_pool_tier`) needs at
+  least `neo4j_cluster_size` schedulable nodes, or member pods beyond the
+  pool's node count will stay `Pending`. A `check` block in `neo4j.tf`
+  warns (non-fatally, at `plan`/`apply`) if `small_pool_node_count` /
+  `large_pool_node_count` is too low for the tier you picked.
+- A cluster-wide `kubernetes_pod_disruption_budget_v1`
+  (`neo4j_cluster` in `neo4j.tf`, only created when `neo4j_cluster_size >=
+  3`) caps voluntary disruptions (e.g. AKS node drains during upgrades) at
+  the same `F` from the fault-tolerance formula, so routine cluster
+  maintenance can't accidentally take the DBMS below quorum.
+- The external `services.neo4j` LoadBalancer is a single Service shared
+  across all members (keyed by `neo4j.name`, not release name, and kept
+  alive across releases via the chart's own `helm.sh/resource-policy:
+  keep` annotation) — you still get one public IP for the whole cluster,
+  not one per pod. Neo4j client drivers using the `neo4j://` routing
+  scheme handle discovering and routing to the current writer themselves.
+- To see all members together: `kubectl -n neo4j get pods -l
+  helm.neo4j.com/neo4j.name=<neo4j_release_name>` (defaults to
+  `neo4j-aks`).
+
+### Licensing caveat — read this before setting `neo4j_cluster_size` above 1
+
+`neo4j_accept_license_agreement` only toggles a chart flag
+(`"yes"`/`"eval"`) — Terraform and the Helm chart have no way to check
+what your actual Neo4j license agreement entitles you to run, and the
+chart applies the same flag identically to every cluster member regardless
+of member count. **A single-server-instance license (e.g. the kind also
+usable in Neo4j Desktop) is very likely scoped to one non-clustered
+instance and does not itself authorize deploying a multi-member Enterprise
+cluster** — clustering entitlement is typically a separate/higher tier in
+Neo4j's commercial terms. Confirm with your Neo4j agreement or account
+rep before running this with `neo4j_cluster_size > 1` against anything
+that isn't purely a technical trial; the `check` blocks in `neo4j.tf`
+only validate the *edition*/*license-flag* combination is internally
+consistent, not that your specific license covers clustering.
 
 ### Multi-tenant identity model
 
@@ -153,6 +212,7 @@ Get the generated Neo4j password and a usable kubeconfig afterwards:
 terraform output -raw neo4j_initial_password   # also in Key Vault as neo4j-admin-password
 terraform output -raw kube_config > kubeconfig
 KUBECONFIG=./kubeconfig kubectl -n neo4j get svc   # find the LoadBalancer's external IP
+KUBECONFIG=./kubeconfig kubectl -n neo4j get pods -l helm.neo4j.com/neo4j.name=neo4j-aks   # all cluster members
 ```
 
 Then see **Onboarding a tenant / identity** above.
@@ -164,13 +224,31 @@ and whose network egress policy blocks `registry.terraform.io` (confirmed
 via a 403 on `terraform init` — not something to route around per that
 policy). Given that, what was actually done:
 
-- `terraform fmt -check -diff -recursive` passes clean on every `.tf` file.
+- `terraform fmt -check -diff -recursive` passes clean on every `.tf` file
+  (the `neo4j_cluster_size`/multi-release changes were hand-aligned to
+  match, since this sandbox has no `terraform` binary to run `fmt` with —
+  re-run it for real before applying).
 - The `helm_release` values (built as a Terraform `locals` map and passed
   via `yamlencode`) were rendered with real sample values through Python's
   `yaml` module to confirm the resulting structure matches the chart's own
-  `values.yaml` shape (`neo4j.resources.*`, `volumes.data.dynamic.*`,
-  `services.neo4j.spec.type`, `nodeSelector`, `podSpec.tolerations`,
-  `config` as a flat dotted-key map).
+  `values.yaml` shape (`neo4j.resources.*`, `neo4j.minimumClusterSize`,
+  `volumes.data.dynamic.*`, `services.neo4j.spec.type`, `nodeSelector`,
+  `podSpec.tolerations`, `config` as a flat dotted-key map), and the
+  `for_each` release-name map (`local.neo4j_release_names`) was rendered
+  the same way to confirm it produces `<name>-0`/`-1`/`-2` for
+  `neo4j_cluster_size = 3` and the original unsuffixed name for `= 1`.
+- The Neo4j Helm chart's own `values.yaml`/templates (fetched directly from
+  `neo4j/helm-charts` on GitHub, not guessed) were checked to confirm:
+  clustering ties members together via `neo4j.name` rather than Helm
+  release name; `podSpec.podAntiAffinity` defaults to `true`; the
+  `services.neo4j` LoadBalancer is one Service shared across a cluster's
+  releases (`helm.sh/resource-policy: keep`); and cluster pods carry the
+  label `helm.neo4j.com/neo4j.name` used here for the `kubectl` selector
+  and the `kubernetes_pod_disruption_budget_v1` selector.
+- `kubernetes_pod_disruption_budget_v1`'s `max_unavailable`/`min_available`
+  are strings in the `hashicorp/kubernetes` provider (checked against the
+  provider docs) — `neo4j.tf` wraps the computed value in `tostring()`
+  accordingly.
 - Every `azurerm_kubernetes_cluster`/`azurerm_kubernetes_cluster_node_pool`/
   `azurerm_key_vault` argument used here (`azure_active_directory_role_based_access_control`,
   `network_profile`, `key_vault_secrets_provider`, `microsoft_defender`,

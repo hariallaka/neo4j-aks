@@ -145,6 +145,22 @@ variable "neo4j_accept_license_agreement" {
   }
 }
 
+variable "neo4j_cluster_size" {
+  type        = number
+  description = "Number of Neo4j cluster members to deploy, each as its own Helm release/pod (see neo4j.tf). 1 = standalone, no clustering. 3+ enables Neo4j causal clustering for HA: fault tolerance follows M = 2F+1, so 3 members tolerate 1 failure and keep write availability, 5 tolerate 2, etc. Clustering requires neo4j_edition = \"enterprise\" and a valid license (neo4j_accept_license_agreement = \"yes\" or \"eval\") -- see the README's HA section for the licensing caveat."
+  default     = 3
+
+  validation {
+    condition     = var.neo4j_cluster_size >= 1
+    error_message = "neo4j_cluster_size must be at least 1."
+  }
+
+  validation {
+    condition     = var.neo4j_cluster_size == 1 || var.neo4j_cluster_size % 2 == 1
+    error_message = "neo4j_cluster_size must be 1 (standalone) or an odd number (3, 5, ...) -- Neo4j clustering uses Raft consensus, which needs an odd number of members to form a majority; an even size adds a member without adding fault tolerance."
+  }
+}
+
 variable "neo4j_cpu" {
   type        = string
   description = "CPU request/limit for the Neo4j container (chart minimum is 0.5)."
