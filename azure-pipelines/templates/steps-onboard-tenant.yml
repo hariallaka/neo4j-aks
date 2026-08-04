@@ -1,8 +1,14 @@
 # steps-onboard-tenant.yml
 #
-# Reusable step template: installs cypher-shell and runs
+# Reusable step template: installs cypher-shell (native auth) and the
+# Python neo4j driver (OIDC auth -- see run_cypher_oidc.py), then runs
 # onboarding/scripts/render-and-run.sh onboard with the given parameters.
 # Included from onboard-tenant-pipeline.yml (or your own pipeline).
+#
+# Which credential path actually gets used at runtime is controlled by the
+# NEO4J_AUTH_MODE pipeline variable (see onboard-tenant-pipeline.yml) --
+# both toolchains are installed unconditionally here for simplicity; the
+# unused one is just idle, not harmful.
 
 parameters:
   - name: tenant
@@ -27,7 +33,12 @@ steps:
       # Pulls a compatible Java runtime automatically as a dependency.
       sudo apt-get install -y cypher-shell
       cypher-shell --version
-    displayName: 'Install cypher-shell'
+    displayName: 'Install cypher-shell (native auth)'
+
+  - bash: |
+      set -euo pipefail
+      python3 -m pip install --quiet --upgrade neo4j
+    displayName: 'Install neo4j Python driver (OIDC auth)'
 
   - bash: |
       set -euo pipefail
@@ -47,5 +58,14 @@ steps:
     displayName: 'Onboard tenant / identity'
     env:
       NEO4J_BOLT_URI: $(NEO4J_BOLT_URI)
+      NEO4J_AUTH_MODE: $(NEO4J_AUTH_MODE)
+      # native auth (used when NEO4J_AUTH_MODE is unset or "native"):
       NEO4J_ADMIN_USER: $(NEO4J_ADMIN_USER)
       NEO4J_ADMIN_PASSWORD: $(NEO4J_ADMIN_PASSWORD)
+      # oidc auth (used when NEO4J_AUTH_MODE = "oidc" -- see
+      # run_cypher_oidc.py and the README's "OIDC-only authentication"
+      # section):
+      ENTRA_TENANT_ID: $(ENTRA_TENANT_ID)
+      PIPELINE_CLIENT_ID: $(PIPELINE_CLIENT_ID)
+      PIPELINE_CLIENT_SECRET: $(PIPELINE_CLIENT_SECRET)
+      NEO4J_OIDC_AUDIENCE_SCOPE: $(NEO4J_OIDC_AUDIENCE_SCOPE)

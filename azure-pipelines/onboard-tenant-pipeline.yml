@@ -13,6 +13,16 @@
 #     "Link secrets from an Azure key vault"), exposing at least the
 #     neo4j-admin-password secret as NEO4J_ADMIN_PASSWORD.
 #   - NEO4J_BOLT_URI and NEO4J_ADMIN_USER below updated for your environment.
+#
+# Once neo4j_disable_native_auth = true (see the main README's "OIDC-only
+# authentication" section), set NEO4J_AUTH_MODE to "oidc" below, add the
+# neo4j-pipeline-client-secret Key Vault secret to the variable group
+# (exposed as PIPELINE_CLIENT_SECRET), and fill in ENTRA_TENANT_ID/
+# PIPELINE_CLIENT_ID/NEO4J_OIDC_AUDIENCE_SCOPE -- NEO4J_ADMIN_USER/PASSWORD
+# stop being usable at that point (native auth is off entirely) and can be
+# removed. Do NOT flip this before running
+# bootstrap-pipeline-admin-pipeline.yml at least once and confirming it
+# works -- see the README.
 
 trigger: none
 pr: none
@@ -51,8 +61,17 @@ variables:
   - group: neo4j-onboarding-secrets
   - name: NEO4J_BOLT_URI
     value: 'neo4j+s://neo4j-aks.example.internal:7687' # replace with your Bolt endpoint
+  - name: NEO4J_AUTH_MODE
+    value: 'native' # "native" (default) or "oidc" -- see the header comment above
   - name: NEO4J_ADMIN_USER
-    value: 'svc_provisioning' # native admin account used only by this pipeline
+    value: 'svc_provisioning' # native admin account used only by this pipeline -- only used when NEO4J_AUTH_MODE = native
+  # Only used when NEO4J_AUTH_MODE = oidc -- see the header comment above.
+  - name: ENTRA_TENANT_ID
+    value: ''
+  - name: PIPELINE_CLIENT_ID
+    value: ''
+  - name: NEO4J_OIDC_AUDIENCE_SCOPE
+    value: ''
 
 stages:
   - stage: OnboardTenant

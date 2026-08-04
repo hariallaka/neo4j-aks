@@ -225,6 +225,19 @@ variable "neo4j_oidc_client_id" {
   default     = ""
 }
 
+variable "neo4j_disable_native_auth" {
+  type        = bool
+  description = "Drop \"native\" from dbms.security.authentication_providers, leaving only \"oidc-azure\" -- disables username/password login entirely, for every account including the built-in neo4j admin and the onboarding pipeline's own login. Requires neo4j_oidc_client_id to be set (enforced by a check block, not a plain validation, since it depends on another variable). See the README's \"OIDC-only authentication\" section before setting this -- it requires a one-time bootstrap (onboarding/cypher/bootstrap-pipeline-admin.cypher.tpl) to run successfully *first*, while native auth is still on, or you lock yourself out with no fallback."
+  default     = false
+}
+
+variable "neo4j_pipeline_client_secret" {
+  type        = string
+  description = "Client secret for the onboarding pipeline's own Entra app registration/service principal (distinct from neo4j_oidc_client_id, which is the Neo4j SSO app the pipeline authenticates *against*, not *as*) -- used for the client-credentials flow once NEO4J_AUTH_MODE=oidc (see onboarding/scripts/run_cypher_oidc.py). Leave empty to skip storing it (e.g. if you manage this secret entirely outside Terraform). When set, stored in Key Vault as neo4j-pipeline-client-secret, same pattern as the native admin password."
+  default     = ""
+  sensitive   = true
+}
+
 variable "neo4j_reverse_proxy_enabled" {
   type        = bool
   description = "Deploy Neo4j's own \"neo4j-reverse-proxy\" chart plus an Istio Gateway/VirtualService in front of it (see ingress.tf), tunneling Bolt and HTTP through a single host on 443 via WebSocket -- for end users who can only reach a raw HTTP(S) port, not Bolt's 7687 directly. Assumes Istio (istiod + an ingress gateway) is already installed/managed in this cluster outside this stack; this only creates the routing objects and the neo4j-reverse-proxy backend, plus a dedicated \"ingress\" node pool (node_pools.tf) for edge workloads -- it does not install Istio itself."

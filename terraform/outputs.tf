@@ -54,6 +54,16 @@ output "neo4j_oidc_configured" {
   value       = var.neo4j_oidc_client_id != ""
 }
 
+output "neo4j_authentication_providers" {
+  description = "The literal dbms.security.authentication_providers value applied -- \"oidc-azure,native\" (both), \"oidc-azure\" (native disabled, var.neo4j_disable_native_auth = true), or unset if OIDC isn't configured at all yet."
+  value       = var.neo4j_oidc_client_id != "" ? local.neo4j_authentication_providers : null
+}
+
+output "neo4j_pipeline_client_secret_stored" {
+  description = "Whether var.neo4j_pipeline_client_secret was supplied and stored in Key Vault as neo4j-pipeline-client-secret."
+  value       = var.neo4j_pipeline_client_secret != ""
+}
+
 output "neo4j_reverse_proxy_enabled" {
   description = "Whether the neo4j-reverse-proxy chart + Istio Gateway/VirtualService were deployed (var.neo4j_reverse_proxy_enabled)."
   value       = var.neo4j_reverse_proxy_enabled

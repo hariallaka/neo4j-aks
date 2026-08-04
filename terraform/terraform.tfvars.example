@@ -52,6 +52,19 @@ neo4j_helm_chart_version = "" # e.g. "2026.6.0" to pin; "" = latest
 # Leave "" until the one-time Entra app registration in README.md is done.
 neo4j_oidc_client_id = ""
 
+# Opt-in, and only after OIDC above is working: drops native (password)
+# auth entirely, leaving only Entra SSO. Requires the one-time bootstrap +
+# rollout sequence in README's "OIDC-only authentication" section --
+# flipping this straight to true without that first locks everyone out,
+# including this stack's own admin password, with no fallback.
+neo4j_disable_native_auth = false
+
+# Only needed once neo4j_disable_native_auth = true: the onboarding
+# pipeline's OWN Entra app registration/service principal's client secret
+# (distinct from neo4j_oidc_client_id -- see README). Leave "" to manage
+# this secret entirely outside Terraform instead.
+neo4j_pipeline_client_secret = ""
+
 # Opt-in: Neo4j's own neo4j-reverse-proxy chart + an Istio Gateway/
 # VirtualService in front of it, for end users who can only reach 80/443
 # (not Bolt's 7687 directly). Assumes Istio is already installed/managed

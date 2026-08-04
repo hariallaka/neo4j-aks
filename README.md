@@ -311,11 +311,15 @@ against Neo4j — no Microsoft Graph API calls to manage Entra app role
 assignments — and (b) revoking one identity never affects another's access
 to the same tenant.
 
-`neo4j.conf` keeps `authentication_providers = "oidc-azure,native"` and
-`authorization_providers = "native"` permanently (not switching to
-OIDC-only): the onboarding pipeline itself authenticates as a native admin
-account (password from Key Vault), which is the standard pattern for
-automation — see the comments in `neo4j.tf`.
+`neo4j.conf` keeps `authorization_providers = "native"` regardless: roles
+are always resolved via `GRANT ROLE`, not by mapping Entra groups/app-roles
+directly. `authentication_providers` defaults to `"oidc-azure,native"` —
+the onboarding pipeline authenticates as a native admin account (password
+from Key Vault), the standard pattern for automation — but can be switched
+to OIDC-only (`"oidc-azure"`, no password login for anyone, including that
+pipeline) via `var.neo4j_disable_native_auth`. See **OIDC-only
+authentication** below before doing that — see the comments in `neo4j.tf`
+either way.
 
 ## One-time Entra ID setup
 
@@ -354,6 +358,72 @@ via [jwt.ms](https://jwt.ms)) before relying on it as the value passed to
 doesn't populate `sub` for app-only tokens, switch
 `dbms.security.oidc.azure.claims.username` to `oid` instead (and adjust
 what value you onboard identities with to match).
+
+## OIDC-only authentication (disabling native/password login)
+
+By default, both Entra SSO (`oidc-azure`) and native (password) login are
+accepted (`dbms.security.authentication_providers = "oidc-azure,native"`).
+Setting `var.neo4j_disable_native_auth = true` drops `native` from that
+list — no username/password login works anymore, for anyone, once applied.
+
+**The actual blast radius is narrower than it sounds.** Every tenant
+identity onboarded via `onboard-tenant.cypher.tpl` is already OIDC-only —
+it's created with `SET AUTH 'oidc-azure' {...}` and never had a password
+in the first place. This setting only affects the two things in this stack
+that still use a native password today: the built-in `neo4j` admin account,
+and the onboarding pipeline's own login (`NEO4J_ADMIN_USER`/`NEO4J_ADMIN_PASSWORD`).
+
+**The catch: Neo4j's auth-provider list is all-or-nothing** — there's no
+"OIDC for humans, password still OK for this one automation account."
+Disabling `native` breaks the onboarding pipeline's own login at the same
+moment it breaks everyone else's password login, and removes any password
+fallback if Entra/OIDC ever misbehaves. Doing this properly means the
+pipeline also authenticates via OIDC (a client-credentials token, not a
+password) — which is what the pieces below set up.
+
+### Required rollout order
+
+Skipping the order below (in particular, disabling native auth before step
+2 succeeds) locks out every native credential — including this stack's own
+generated admin password — with **no fallback**.
+
+1. **Configure OIDC** per the section above (`neo4j_oidc_client_id` set),
+   with `neo4j_disable_native_auth` still `false` (the default). Also
+   register a **second, separate** Entra app registration/service
+   principal — this one for the onboarding pipeline itself to authenticate
+   *as* (distinct from the Neo4j SSO app registration above, which is the
+   audience the pipeline requests a token *for*). Set its client secret as
+   `neo4j_pipeline_client_secret` in `terraform.tfvars` and re-apply —
+   Terraform stores it in Key Vault as `neo4j-pipeline-client-secret`.
+2. **Bootstrap the pipeline's own OIDC identity**: run
+   `azure-pipelines/bootstrap-pipeline-admin-pipeline.yml` (or
+   `onboarding/scripts/render-and-run.sh bootstrap-pipeline-admin
+   <user-name> <pipeline-service-principal-object-id>` directly) — this
+   uses native auth (still enabled at this point) to create a Neo4j user
+   linked to the pipeline's Entra identity and grant it the built-in
+   `admin` role. See `onboarding/cypher/bootstrap-pipeline-admin.cypher.tpl`.
+3. **Verify OIDC auth actually works end to end**: set `NEO4J_AUTH_MODE=oidc`
+   (plus `ENTRA_TENANT_ID`/`PIPELINE_CLIENT_ID`/`PIPELINE_CLIENT_SECRET`/
+   `NEO4J_OIDC_AUDIENCE_SCOPE`) and run a real onboard/offboard — see
+   `onboarding/README.md`'s "OIDC-only clusters" section — before touching
+   the config flag that removes the fallback.
+4. **Only then** set `neo4j_disable_native_auth = true` in
+   `terraform.tfvars` and re-apply, and switch
+   `onboard-tenant-pipeline.yml`/`offboard-identity-pipeline.yml` over to
+   `NEO4J_AUTH_MODE: 'oidc'` for good (see `azure-pipelines/README.md`).
+
+### Why cypher-shell isn't used for the OIDC path
+
+cypher-shell has no documented flag for bearer/access-token auth (checked
+directly against Neo4j's own `cypher-shell.adoc` — only `-u`/`-p`/
+`--impersonate` are listed). `onboarding/scripts/run_cypher_oidc.py` uses
+the neo4j Python driver's `bearer_auth()` instead — Neo4j's own documented
+mechanism for OIDC service-account/automation access (see Sources) — to
+request a client-credentials token from Entra and run the rendered Cypher
+against Neo4j with it. `render-and-run.sh` dispatches between it and
+cypher-shell based on `NEO4J_AUTH_MODE`; `bootstrap-pipeline-admin` always
+forces native/cypher-shell regardless of that setting, since it's what
+makes the OIDC path possible in the first place.
 
 ## Onboarding a tenant / identity
 
@@ -499,6 +569,26 @@ Docker daemon here).
   but wasn't applied against a real cluster in this sandbox (no live AKS,
   and `helm.neo4j.com`/`istio.io`/`github.com` were all unreachable here —
   see the chart-repo-access note above).
+- The OIDC-only auth changes were exercised directly, unlike most of this
+  README's other Terraform-side changes (this sandbox does have Python and,
+  once `apt-get install gettext-base` was run, `envsubst`, even without a
+  live cluster or `terraform`/`cypher-shell`/network access):
+  `render-and-run.sh bootstrap-pipeline-admin` was run in `--dry-run` and
+  confirmed to render `bootstrap-pipeline-admin.cypher.tpl` correctly and
+  reject a malformed Entra Object ID; a stubbed `python3` on `PATH`
+  confirmed `NEO4J_AUTH_MODE=oidc` actually dispatches `onboard` to
+  `run_cypher_oidc.py` instead of `cypher-shell`, and separately confirmed
+  `bootstrap-pipeline-admin` **ignores** `NEO4J_AUTH_MODE=oidc` and stays
+  on native (failing on missing `NEO4J_ADMIN_USER` rather than ever
+  invoking the stub) — the "always native" behavior the design depends on.
+  `run_cypher_oidc.py`'s `split_statements()` was run directly against the
+  real rendered bootstrap template and confirmed to produce the expected
+  two statements; its env-var validation was confirmed to fail clearly
+  (not silently) when Entra credentials are unset. Not exercised: an
+  actual Entra token request or a real Neo4j bearer-token connection (no
+  network/cluster here) — `bearer_auth()`'s existence and signature were
+  confirmed against Neo4j's own Python Driver Manual and blog post (see
+  Sources), not assumed.
 - Every `azurerm_kubernetes_cluster`/`azurerm_kubernetes_cluster_node_pool`/
   `azurerm_key_vault` argument used here (`azure_active_directory_role_based_access_control`,
   `network_profile`, `key_vault_secrets_provider`, `microsoft_defender`,
@@ -548,6 +638,9 @@ against a real Neo4j instance before turning dry-run off.
 - [Istio Gateway configuration reference](https://istio.io/latest/docs/reference/config/networking/gateway/)
 - [Istio VirtualService configuration reference](https://istio.io/latest/docs/reference/config/networking/virtual-service/)
 - [kubectl_manifest (gavinbunney/kubectl Terraform provider docs)](https://registry.terraform.io/providers/gavinbunney/kubectl/latest/docs/resources/manifest)
+- [Single sign-on integration — Operations Manual](https://github.com/neo4j/docs-operations/blob/main/modules/ROOT/pages/authentication-authorization/sso-integration.adoc)
+- [Advanced connection information (bearer_auth) — Neo4j Python Driver Manual](https://neo4j.com/docs/python-manual/current/connect-advanced/)
+- [How to create and integrate an Okta OIDC service account with Neo4j — Neo4j Developer Blog](https://neo4j.com/blog/developer/how-to-create-and-integrate-an-okta-oidc-service-account-with-neo4j/)
 - [azurerm_kubernetes_cluster (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster)
 - [azurerm_kubernetes_cluster_node_pool (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/kubernetes_cluster_node_pool)
 - [azurerm_key_vault (Terraform Registry)](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs/resources/key_vault)

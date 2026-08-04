@@ -1,0 +1,3 @@
+# Python artifacts from onboarding/scripts/run_cypher_oidc.py.
+__pycache__/
+*.pyc
