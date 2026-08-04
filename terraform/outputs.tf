@@ -28,8 +28,14 @@ output "neo4j_namespace" {
   value = kubernetes_namespace.neo4j.metadata[0].name
 }
 
-output "neo4j_release_name" {
-  value = helm_release.neo4j.name
+output "neo4j_cluster_size" {
+  description = "Number of Neo4j cluster members deployed (neo4j_cluster_size)."
+  value       = var.neo4j_cluster_size
+}
+
+output "neo4j_release_names" {
+  description = "Helm release name for each Neo4j cluster member. All members share neo4j.name (var.neo4j_release_name) and are selectable together via the label helm.neo4j.com/neo4j.name=<neo4j_release_name>."
+  value       = [for r in helm_release.neo4j : r.name]
 }
 
 output "neo4j_initial_password" {
