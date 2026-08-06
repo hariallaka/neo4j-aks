@@ -338,6 +338,95 @@ doesn't populate `sub` for app-only tokens, switch
 `dbms.security.oidc.azure.claims.username` to `oid` instead (and adjust
 what value you onboard identities with to match).
 
+## Connecting Azure resources via managed identity
+
+A Function App, App Service, VM, or anything else with a **user-assigned
+(or system-assigned) managed identity** can authenticate to Neo4j exactly
+the same way the onboarding pipeline's own OIDC path does
+(`onboarding/scripts/run_cypher_oidc.py`'s `bearer_auth()` mechanism) —
+no new mechanism needed. Two separate gates decide whether it actually
+works, and only one of them is optional.
+
+### Gate 1: Neo4j's own user mapping (required, already built, identity-type-agnostic)
+
+`onboard-tenant.cypher.tpl` does `CREATE USER ... SET AUTH 'oidc-azure'
+{SET ID '<entra-object-id>'}` — Neo4j has no concept of "app registration"
+vs. "managed identity" here, it only sees an Object ID matched against the
+token's `sub`/`oid` claim. A managed identity's **Object ID** (its
+Enterprise Application/service principal ID — **not** its Client ID) is
+onboarded exactly like any other identity:
+
+```bash
+./scripts/render-and-run.sh onboard acmecorp writer func-acmecorp-ingest <uami-object-id>
+```
+
+The same caveat from **One-time Entra ID setup** above applies, worth
+re-stating here since it's easy to assume it carries over automatically:
+confirm whether `sub` or `oid` is actually populated for **managed
+identity** client-credentials tokens specifically in your tenant (decode
+a real token, e.g. via [jwt.ms](https://jwt.ms)) — this can differ from
+regular app-registration-backed service principals, so don't assume it's
+identical without checking.
+
+### Gate 2: Entra's own token-issuance gate (optional, recommended for defense in depth)
+
+The Neo4j SSO app registration (`neo4j_oidc_client_id`) is the *audience*
+the managed identity requests a token for
+(`api://<neo4j_oidc_client_id>/.default`). Whether Entra requires an
+explicit grant before it'll hand out that token depends on one setting on
+that app's **Enterprise Application** view (not the App Registration
+blade) — **"Assignment required?"**:
+
+- **"No"** (the default for most newly registered apps): any security
+  principal in the tenant, including any managed identity, can silently
+  obtain a valid token for that audience — no binding needed. Neo4j's own
+  `dbms.security.require_local_user=true` check (Gate 1) becomes your
+  *only* access control, since Entra hands out tokens freely.
+- **"Yes"**: you must explicitly assign the managed identity before it can
+  get a token at all — Enterprise Applications -> Neo4j SSO app -> Users
+  and groups -> Add assignment -> search for the managed identity by
+  name. This is the only place to do this for a managed identity — unlike
+  a regular app registration, it has no "API permissions" blade of its
+  own to request access from.
+
+**Recommended: set this to "Yes"** and explicitly assign each Function
+App's/App Service's identity — a compromised or misconfigured resource
+elsewhere in the tenant then can't even *fetch* a Neo4j-audience token,
+rather than relying solely on Gate 1.
+
+### What the calling application's code looks like
+
+Same `bearer_auth()` pattern as `run_cypher_oidc.py`, via the Azure
+Identity SDK instead of a client secret (a managed identity has none for
+you to hold):
+
+```python
+from azure.identity import ManagedIdentityCredential
+from neo4j import GraphDatabase, bearer_auth
+
+# client_id is required for a user-assigned identity; omit it for system-assigned.
+credential = ManagedIdentityCredential(client_id="<uami-client-id>")
+token = credential.get_token(f"api://{NEO4J_OIDC_CLIENT_ID}/.default").token
+
+driver = GraphDatabase.driver(NEO4J_BOLT_URI, auth=bearer_auth(token))
+```
+
+For anything longer-lived than a single request (an App Service, a
+Function held warm across invocations), use the driver's
+`AuthManagers.bearer(auth_provider)` pattern instead of a one-shot token,
+so it refreshes before expiry rather than failing mid-connection — see
+the Python Driver Manual link in Sources.
+
+### Does this change once native auth is disabled?
+
+No — worth being explicit about, since it's easy to assume otherwise:
+**this flow is already OIDC-only regardless.** Onboarded identities never
+had a password in the first place (see **Multi-tenant identity model**
+above); `neo4j_disable_native_auth` only removes password login for the
+built-in `neo4j` admin account and the onboarding pipeline's own
+bootstrap login. A Function App authenticating via managed identity
+doesn't notice the difference either way.
+
 ## OIDC-only authentication (disabling native/password login)
 
 By default, both Entra SSO (`oidc-azure`) and native (password) login are
@@ -563,6 +652,17 @@ Docker daemon here).
   network/cluster here) — `bearer_auth()`'s existence and signature were
   confirmed against Neo4j's own Python Driver Manual and blog post (see
   Sources), not assumed.
+- The **Connecting Azure resources via managed identity** section's code
+  snippet (`ManagedIdentityCredential` + `bearer_auth`) was parsed with
+  Python's `ast` module to confirm it's syntactically valid, not run
+  end-to-end (no Azure subscription/managed identity available here). The
+  "Assignment required?" / Enterprise Application app-role-assignment
+  behavior it describes is standard, well-documented Entra ID platform
+  behavior, not something specific to this repo that could be verified by
+  running code — treat the general mechanism as reliable but double-check
+  exact current Azure Portal button/blade labels against Microsoft's own
+  docs, since portal UI text drifts over time in ways a written
+  description can't track.
 - Every `azurerm_kubernetes_cluster`/`azurerm_kubernetes_cluster_node_pool`/
   `azurerm_key_vault` argument used here (`azure_active_directory_role_based_access_control`,
   `network_profile`, `key_vault_secrets_provider`, `microsoft_defender`,
